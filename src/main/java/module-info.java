@@ -1,9 +1,9 @@
 module org.bytecraft.skyline {
-  requires javafx.controls;
-  requires javafx.fxml;
-  requires com.google.gson;
+    requires javafx.controls;
+    requires javafx.fxml;
+    requires com.google.gson;
+    requires org.antlr.antlr4.runtime;
 
-
-  opens org.robincores.r8 to javafx.fxml;
-  exports org.robincores.r8;
+    opens io.github.robincores.r8 to javafx.fxml;
+    exports io.github.robincores.r8;
 }

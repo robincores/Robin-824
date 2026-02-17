@@ -66,7 +66,7 @@ start:
     stl @0      ; @0: PCB_Idle
     st
 
-    ; Initialise System Timer
+    ; Initialise System Timer (Start Timer Task)
     i 0xF00000  ; Load address of the comparison value (mtimecmp)
     i 0x080000  ; Load the timer comparison value into the register
     st          ; Store the timer comparison value
@@ -197,7 +197,7 @@ dispatch:
     pop
     stl @0
 
-    ; Reset System Timer
+    ; Reset System Timer (Timer Task)
     i 0xF00002  ; Load MSB address of the comparison value (mtimecmp)
     u 0x08      ; Load upper part of the comparison value
     sb          ; Store the timer comparison value
