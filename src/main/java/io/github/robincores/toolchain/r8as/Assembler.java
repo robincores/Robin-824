@@ -50,8 +50,28 @@ public class Assembler {
     // ---
     AssemblerSpec spec;
 
-int ip = 0;
-    int origin = 0;
+    // ----- Sections (Step 15) -----
+    static final class SectionState {
+        final String name;      // e.g. ".text", ".data", ".bss", ".section foo"
+        final boolean bss;      // true => reserves space, does not emit bytes
+        int ip = 0;             // current location counter (word address)
+        int origin = 0;         // section base/origin (word address)
+        int codelen = 0;        // minimum emitted length (words) for this section
+        boolean originLocked = false; // once we have emitted words, origin becomes fixed
+
+        final List<Integer> outwords = new ArrayList<>();
+        final List<AssemblerFixup> fixups = new ArrayList<>();
+
+        SectionState(String name, boolean bss) {
+            this.name = name;
+            this.bss = bss;
+        }
+    }
+
+    // Deterministic section ordering: insertion order (we seed with .text)
+    private final LinkedHashMap<String, SectionState> sections = new LinkedHashMap<>();
+    private SectionState curSec;
+
     int linenum = 0;
     Map<String, Symbol> symbols = new HashMap<>();
 
@@ -63,7 +83,6 @@ int ip = 0;
     private static final Pattern NUM_REF_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])([0-9]+)([fb])(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
     private static final Pattern NUM_REF_REWRITTEN_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])__L([0-9]+)([fb])(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
     List<AssemblerError> errors = new ArrayList<>();
-    List<Integer> outwords = new ArrayList<>();
 
     // Source context for .include/.module (best-effort; supports nested includes)
     private final java.util.Deque<java.nio.file.Path> sourceDirStack = new java.util.ArrayDeque<>();
@@ -105,11 +124,18 @@ int ip = 0;
     private String currentSourceName = "<input>";
     private int currentCol = 1; // 1-based, best-effort
 
+    // Global listing (source order across sections)
     List<AssemblerLine> asmlines = new ArrayList<>();
-    List<AssemblerFixup> fixups = new ArrayList<>();
     int width = 8;
-    int codelen = 0;
     boolean aborted = false;
+
+    // Populated by finish() (flat concatenated output + section metadata)
+    private List<Integer> finalOutwords = null;
+    private Map<String, Object> finalIntermediate = null;
+
+    public Assembler() {
+        this(null);
+    }
 
     public Assembler(AssemblerSpec spec) {
         this.spec = spec;
@@ -117,8 +143,39 @@ int ip = 0;
             normalizeSpec(spec);
             preprocessRules();
         }
+
+        // Seed with default section for deterministic output ordering.
+        // (If the user never mentions sections, behavior matches legacy single-section assembly.)
+        switchSection(".text", false);
     }
-    /** Adds a filesystem include search path (used by .include/.module). */
+    
+    private static String normalizeSectionName(String raw) {
+        if (raw == null) return ".text";
+        String s = raw.trim();
+        if (s.isEmpty()) return ".text";
+        if (!s.startsWith(".")) s = "." + s;
+        return s;
+    }
+
+    private void switchSection(String name, boolean bss) {
+        String n = normalizeSectionName(name);
+        SectionState existing = sections.get(n);
+        if (existing == null) {
+            SectionState sec = new SectionState(n, bss);
+            sections.put(n, sec);
+            curSec = sec;
+        } else {
+            if (existing.bss != bss) {
+                fatal("Section type mismatch for " + n + " (existing " + (existing.bss ? ".bss" : "progbits")
+                        + ", requested " + (bss ? ".bss" : "progbits") + ")");
+                return;
+            }
+            curSec = existing;
+        }
+    }
+
+
+/** Adds a filesystem include search path (used by .include/.module). */
     public Assembler addIncludePath(java.nio.file.Path dir) {
         if (dir != null) includeSearchPaths.add(dir);
         return this;
@@ -299,29 +356,68 @@ int ip = 0;
             return;
         }
 
-        this.asmlines.add(new AssemblerLine(this.linenum, this.ip, result.nbits));
+        if (curSec == null) {
+            switchSection(".text", false);
+        }
+        if (curSec.bss) {
+            this.fatal("Cannot emit instructions in " + curSec.name + " (BSS section)");
+            return;
+        }
+
+        this.asmlines.add(new AssemblerLine(this.linenum, curSec.ip, result.nbits, curSec.name));
         long opcode = result.opcode;
         int nb = result.nbits / this.width;
 
         for (int i = 0; i < nb; i++) {
             int shift = (nb - 1 - i) * this.width;
             int word = (int) ((opcode >>> shift) & mask64(this.width));
-            this.outwords.add(word & mask32(this.width));
-            this.ip++;
+            emitWord(word);
         }
     }
 
+    private void emitWord(int word) {
+        int idx = curSec.ip - curSec.origin;
+        if (idx < 0) {
+            this.fatal("Attempted to emit before section origin (ip=" + curSec.ip + ", origin=" + curSec.origin + ")");
+            return;
+        }
+
+        while (curSec.outwords.size() < idx) {
+            curSec.outwords.add(0);
+        }
+
+        int w = word & mask32(this.width);
+        if (idx == curSec.outwords.size()) {
+            curSec.outwords.add(w);
+        } else {
+            curSec.outwords.set(idx, w);
+        }
+
+        curSec.ip++;
+        curSec.originLocked = true;
+    }
+
     void addWords(int[] data) {
-        this.asmlines.add(new AssemblerLine(this.linenum, this.ip, this.width * data.length));
+        if (curSec == null) {
+            switchSection(".text", false);
+        }
+
+        this.asmlines.add(new AssemblerLine(this.linenum, curSec.ip, this.width * data.length, curSec.name));
+
+        if (curSec.bss) {
+            // Reserve space only (do not emit bytes)
+            curSec.ip += data.length;
+            return;
+        }
+
         for (int datum : data) {
-            this.outwords.add(datum & mask32(this.width));
-            this.ip++;
+            emitWord(datum);
         }
     }
 
     int[] parseData(String[] toks) {
         int[] data = new int[toks.length];
-        int startIp = this.ip;
+        int startIp = curSec.ip;
 
         for (int i = 0; i < toks.length; i++) {
             String expr = toks[i];
@@ -338,7 +434,7 @@ int ip = 0;
 
                 if (ev == null) {
                     // forward ref (symbol or expression)
-                    this.fixups.add(new AssemblerFixup(
+                    curSec.fixups.add(new AssemblerFixup(
                             expr, startIp + i, this.width, 0, 0, this.width, this.linenum,
                             false, 0, 1, "big"
                     ));
@@ -382,6 +478,11 @@ int ip = 0;
         return bytes / bpw;
     }
 
+int wordsToBytes(int words) {
+    return words * bytesPerWord();
+}
+
+
     void alignIPBytes(int alignBytes) {
         int bpw = bytesPerWord();
         if ((alignBytes % bpw) != 0) {
@@ -395,7 +496,7 @@ int ip = 0;
         if (align < 1) {
             this.fatal("Invalid alignment value");
         }
-        long mod = this.ip % align;
+        long mod = curSec.ip % align;
         if (mod == 0) {
             return;
         }
@@ -418,7 +519,7 @@ int ip = 0;
     }
 
     private long evalExpr64(String expr) {
-        final Long v = evalExprAllowLocals(expr, this.ip);
+        final Long v = evalExprAllowLocals(expr, curSec.ip);
         if (v == null) {
             throw new IllegalArgumentException("Unknown symbol in expression: " + expr);
         }
@@ -740,14 +841,14 @@ int ip = 0;
                     // Try to evaluate as an expression. If it contains unknown symbols, defer as a fixup.
                     Long ev;
                     try {
-                        ev = evalExprAllowLocals(id, this.ip);
+                        ev = evalExprAllowLocals(id, curSec.ip);
                     } catch (IllegalArgumentException ex) {
                         return new AssemblerErrorResult("Bad expression '" + id + "': " + ex.getMessage());
                     }
 
                     if (ev == null) {
-                        this.fixups.add(new AssemblerFixup(
-                                id, this.ip, v.bits, shift, oplen, n, this.linenum,
+                        curSec.fixups.add(new AssemblerFixup(
+                                id, curSec.ip, v.bits, shift, oplen, n, this.linenum,
                                 v.iprel, v.ipofs, v.ipmul == 0 ? 1 : v.ipmul, v.endian
                         ));
                         xl = 0;
@@ -755,7 +856,7 @@ int ip = 0;
                         xl = ev;
                     if (v.iprel) {
                         long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
-                        xl = (xl - this.ip) * ipmul - v.ipofs;
+                        xl = (xl - curSec.ip) * ipmul - v.ipofs;
                     }
                         long max = mask64(v.bits);
                         long min = signedMin(v.bits);
@@ -767,7 +868,7 @@ int ip = 0;
                 } else {
                     if (v.iprel) {
                         long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
-                        xl = (xl - this.ip) * ipmul - v.ipofs;
+                        xl = (xl - curSec.ip) * ipmul - v.ipofs;
                     }
                     long max = mask64(v.bits);
                     long min = signedMin(v.bits);
@@ -895,79 +996,139 @@ int ip = 0;
     void parseDirective(String[] tokens) {
         String cmd = tokens[0].toLowerCase(Locale.ROOT);
 
+        // Section selectors
+        if (cmd.equals(".text")) {
+            switchSection(".text", false);
+            return;
+        }
+        if (cmd.equals(".bss")) {
+            switchSection(".bss", true);
+            return;
+        }
+        // ".data" is ambiguous: if it has args, it's a data-emission directive; if not, it's a section selector.
+        if (cmd.equals(".data") && tokens.length == 1) {
+            switchSection(".data", false);
+            return;
+        }
+        if (cmd.equals(".section")) {
+            if (tokens.length < 2) {
+                fatal(".section requires a name");
+                return;
+            }
+            String secName = normalizeSectionName(tokens[1]);
+            boolean isBss = secName.equals(".bss");
+            switchSection(secName, isBss);
+            return;
+        }
+
         switch (cmd) {
-            case ".define":
+            case ".define": {
+                if (tokens.length < 3) {
+                    fatal("Usage: .define NAME value");
+                    break;
+                }
                 symbols.put(tokens[1].toLowerCase(Locale.ROOT), new Symbol(parseConst(tokens[2])));
                 break;
+            }
 
-case ".equ":
-case ".set": {
-    boolean allowRedef = cmd.equals(".set");
-    if (tokens.length < 3) {
-        warning("Usage: " + cmd + " NAME expr");
-        break;
-    }
-    String name = tokens[1].toLowerCase(Locale.ROOT);
-    String expr = tokens[2];
+            case ".equ":
+            case ".set": {
+                boolean allowRedef = cmd.equals(".set");
+                if (tokens.length < 3) {
+                    warning("Usage: " + cmd + " NAME expr");
+                    break;
+                }
+                String name = tokens[1].toLowerCase(Locale.ROOT);
+                String expr = tokens[2];
 
-    Long ev;
-    try {
-        ev = evalExprAllowLocals(expr, ip);
-    } catch (IllegalArgumentException ex) {
-        warning("Bad expression '" + expr + "': " + ex.getMessage());
-        ev = null;
-    }
+                Long ev;
+                try {
+                    ev = evalExprAllowLocals(expr, curSec.ip);
+                } catch (IllegalArgumentException ex) {
+                    warning("Bad expression '" + expr + "': " + ex.getMessage());
+                    ev = null;
+                }
 
-    if (ev == null) {
-        warning("Unresolved symbol/expression '" + expr + "'");
-        break;
-    }
+                if (ev == null) {
+                    warning("Unresolved symbol/expression '" + expr + "'");
+                    break;
+                }
 
-    if (!allowRedef && symbols.containsKey(name)) {
-        warning("Symbol '" + name + "' already defined");
-        break;
-    }
+                if (!allowRedef && symbols.containsKey(name)) {
+                    warning("Symbol '" + name + "' already defined");
+                    break;
+                }
 
-    symbols.put(name, new Symbol((int) (long) ev));
-    break;
-}
-
-case ".macro": {
-    if (tokens.length < 2) {
-        fatal(".macro requires a name");
-        break;
-    }
-    beginMacroDef(tokens);
-    break;
-}
-case ".endm":
-case ".endmacro": {
-    if (macroDefActive) {
-        finishMacroDef();
-    } else {
-        fatal(tokens[0] + " without active .macro");
-    }
-    break;
-}
-
-            case ".org":
-                ip = origin = bytesToWords(parseConst(tokens[1]), "org");
+                symbols.put(name, new Symbol((int) (long) ev));
                 break;
+            }
 
-            case ".len":
-                codelen = bytesToWords(parseConst(tokens[1]), "len");
+            case ".macro": {
+                if (tokens.length < 2) {
+                    fatal(".macro requires a name");
+                    break;
+                }
+                beginMacroDef(tokens);
                 break;
+            }
+            case ".endm":
+            case ".endmacro": {
+                if (macroDefActive) {
+                    finishMacroDef();
+                } else {
+                    fatal(tokens[0] + " without active .macro");
+                }
+                break;
+            }
 
-            case ".width":
+            case ".org": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .org addr");
+                    break;
+                }
+                int newIp = bytesToWords(parseConst(tokens[1]), "org");
+
+                // Per-section .org:
+                // - Before any emission in this section, sets both origin and ip.
+                // - After emission, only moves ip (and will pad with zeros on next emission if needed).
+                if (!curSec.originLocked && curSec.outwords.isEmpty()) {
+                    curSec.origin = newIp;
+                    curSec.ip = newIp;
+                } else {
+                    curSec.ip = newIp;
+                }
+                break;
+            }
+
+            case ".len": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .len bytes");
+                    break;
+                }
+                curSec.codelen = bytesToWords(parseConst(tokens[1]), "len");
+                break;
+            }
+
+            case ".width": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .width 8|16|24|32");
+                    break;
+                }
                 width = parseConst(tokens[1]);
                 if (!(width == 8 || width == 16 || width == 24 || width == 32)) {
                     fatal("Unsupported .width " + width + " (use 8,16,24,32)");
                 }
                 break;
+            }
 
-            case ".arch":
+            case ".arch": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .arch name");
+                    break;
+                }
                 fatalIf(loadArch(tokens[1]));
                 break;
+            }
 
             case ".include": {
                 String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
@@ -983,20 +1144,47 @@ case ".endmacro": {
                 break;
             }
 
-            case ".data":
-                addWords(parseData(Arrays.copyOfRange(tokens, 1, tokens.length)));
-                break;
+            case ".data": {
+                if (tokens.length < 2) {
+                    // handled above when tokens.length == 1 (section selector)
+                    break;
+                }
+                int n = tokens.length - 1;
 
-            case ".string": {
-                String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
-                raw = unquote(raw);
-                addWords(stringToData(raw));
+                if (curSec.bss) {
+                    // Reserve N words (values irrelevant in BSS)
+                    addWords(new int[n]);
+                } else {
+                    addWords(parseData(Arrays.copyOfRange(tokens, 1, tokens.length)));
+                }
                 break;
             }
 
-            case ".align":
+            case ".string": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .string \"...\"");
+                    break;
+                }
+                String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
+                raw = unquote(raw);
+                int[] data = stringToData(raw);
+
+                if (curSec.bss) {
+                    addWords(new int[data.length]);
+                } else {
+                    addWords(data);
+                }
+                break;
+            }
+
+            case ".align": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .align N");
+                    break;
+                }
                 alignIPBytes(parseConst(tokens[1]));
                 break;
+            }
 
             default:
                 warning("Unrecognized directive: " + String.join(" ", tokens));
@@ -1275,7 +1463,7 @@ case ".endmacro": {
         var nm = NUM_LABEL_DEF_PATTERN.matcher(noComment);
         if (nm.find()) {
             int n = Integer.parseInt(nm.group(1));
-            defineNumericLabel(n, this.ip);
+            defineNumericLabel(n, curSec.ip);
             parseLine = parseLine.substring(nm.end()).stripLeading();
             String rest = stripComments(parseLine).trim();
             if (rest.isEmpty()) return null;
@@ -1291,7 +1479,7 @@ case ".endmacro": {
             }
 
             if (pl.label != null) {
-                this.symbols.put(pl.label.toLowerCase(Locale.ROOT), new Symbol(this.ip));
+                this.symbols.put(pl.label.toLowerCase(Locale.ROOT), new Symbol(curSec.ip));
             }
 
             if (pl.directiveTokens != null) {
@@ -1371,7 +1559,7 @@ case ".endmacro": {
         Matcher matcher = pattern.matcher(raw);
         while (matcher.find()) {
             String label = matcher.group(1);
-            this.symbols.put(label.toLowerCase(Locale.ROOT), new Symbol(this.ip));
+            this.symbols.put(label.toLowerCase(Locale.ROOT), new Symbol(curSec.ip));
         }
         raw = matcher.replaceAll("").trim();
 
@@ -1398,92 +1586,179 @@ case ".endmacro": {
         return matchAndEmit(norm);
     }
     // Apply fixups for unresolved symbols/expressions after instruction assembly
-    public void applyFixup(AssemblerFixup fix, long resolvedValue) {
-        long value = resolvedValue;
+    // Apply fixups for unresolved symbols/expressions after instruction assembly
+private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue) {
+    long value = resolvedValue;
 
-        if (fix.iprel) {
-            value = (value - fix.ofs) * fix.ipmul - fix.ipofs;
+    if (fix.iprel) {
+        value = (value - fix.ofs) * fix.ipmul - fix.ipofs;
+    }
+
+    long max = mask64(fix.size);
+    long min = signedMin(fix.size);
+    if (fix.size < 64 && (value < min || value > max)) {
+        warning("Value " + value + " does not fit in " + fix.size + " bits", fix.line);
+    }
+    value &= max;
+
+    // Match buildInstruction semantics: swap full source width first
+    if ("little".equals(fix.endian)) {
+        value = swapEndian64(value, fix.size);
+    }
+
+    if (fix.srcofs > 0) {
+        value >>>= fix.srcofs;
+    }
+    value &= mask64(fix.dstlen);
+
+    for (int i = 0; i < fix.dstlen; i++) {
+        int dstBit0 = fix.dstofs + i;
+        int dstWord = fix.ofs + (dstBit0 / this.width);
+        int dstBit = this.width - 1 - (dstBit0 % this.width);
+
+        int outIndex = dstWord - sec.origin;
+        if (outIndex < 0) {
+            warning("Fixup for '" + fix.sym + "' writes before section origin (" + sec.name + ")", fix.line);
+            return;
         }
+        while (outIndex >= sec.outwords.size()) sec.outwords.add(0);
 
-        long max = mask64(fix.size);
-        long min = signedMin(fix.size);
-        if (fix.size < 64 && (value < min || value > max)) {
-            this.warning("Value " + value + " does not fit in " + fix.size + " bits", fix.line);
+        int bitMask = (int) (1L << dstBit);
+
+        int cur = sec.outwords.get(outIndex) & ~bitMask;
+
+        long srcBit = (value >>> (fix.dstlen - 1 - i)) & 1L;
+        if (srcBit != 0) cur |= bitMask;
+
+        cur &= mask32(this.width);
+        sec.outwords.set(outIndex, cur);
+    }
+}
+
+    void applyFixup(AssemblerFixup fix, long resolvedValue) {
+        if (curSec == null) {
+            switchSection(".text", false);
         }
-        value &= max;
-
-        // Match buildInstruction semantics: swap full source width first
-        if ("little".equals(fix.endian)) {
-            value = swapEndian64(value, fix.size);
-        }
-
-        if (fix.srcofs > 0) {
-            value >>>= fix.srcofs;
-        }
-        value &= mask64(fix.dstlen);
-
-        for (int i = 0; i < fix.dstlen; i++) {
-            int dstBit0 = fix.dstofs + i;
-            int dstWord = fix.ofs + (dstBit0 / this.width);
-            int dstBit = this.width - 1 - (dstBit0 % this.width);
-
-            int outIndex = dstWord - this.origin;
-            if (outIndex < 0) {
-                this.warning("Fixup for '" + fix.sym + "' writes before origin", fix.line);
-                return;
-            }
-            while (outIndex >= outwords.size()) outwords.add(0);
-
-            int bitMask = (int) (1L << dstBit);
-
-            int cur = outwords.get(outIndex) & ~bitMask;
-
-            long srcBit = (value >>> (fix.dstlen - 1 - i)) & 1L;
-            if (srcBit != 0) cur |= bitMask;
-
-            cur &= mask32(this.width);
-            outwords.set(outIndex, cur);
-        }
+        applyFixup(curSec, fix, resolvedValue);
     }
 
     public void applyFixup(AssemblerFixup fix, Symbol sym) {
-        this.applyFixup(fix, (long) sym.value);
+        applyFixup(fix, sym.value);
     }
 
-    // Finalize the assembly process and apply all fixups
     public AssemblerState finish() {
-        for (AssemblerFixup fix : this.fixups) {
-            Long ev;
-            try {
-                ev = evalExprAllowLocals(fix.sym, fix.ofs);
-            } catch (IllegalArgumentException ex) {
-                this.warning("Bad fixup expression '" + fix.sym + "': " + ex.getMessage(), fix.line);
+        if (aborted) {
+            return state();
+        }
+
+        // Resolve fixups per section
+        for (SectionState sec : sections.values()) {
+            if (sec.bss) {
+                sec.fixups.clear();
                 continue;
             }
 
-            if (ev != null) {
-                this.applyFixup(fix, ev);
-            } else {
-                this.warning("Unresolved symbol/expression '" + fix.sym + "'", fix.line);
+            for (AssemblerFixup fix : sec.fixups) {
+                Long ev;
+                try {
+                    ev = evalExprAllowLocals(fix.sym, fix.ofs);
+                } catch (IllegalArgumentException ex) {
+                    warning("Bad fixup expr '" + fix.sym + "': " + ex.getMessage());
+                    ev = null;
+                }
+
+                if (ev == null) {
+                    warning("Unresolved symbol/expression '" + fix.sym + "'");
+                } else {
+                    applyFixup(sec, fix, ev);
+                }
+            }
+            sec.fixups.clear();
+
+            // Per-section .len padding
+            if (sec.codelen > 0) {
+                while (sec.outwords.size() < sec.codelen) {
+                    sec.outwords.add(0);
+                }
             }
         }
 
+        // Fill listing bytes (insns) for each source line, using that line's section
+        int digits = (int) Math.ceil(this.width / 4.0);
         for (AssemblerLine al : this.asmlines) {
-            al.insns = "";
-            for (int j = 0; j < al.nbits / this.width; j++) {
-                int index = al.offset + j - this.origin;
-                int word = (index < outwords.size()) ? outwords.get(index) : 0;
-                if (j > 0) al.insns += " ";
-                al.insns += hex(word, this.width / 4);
+            SectionState sec = sections.get(al.section);
+            if (sec == null || sec.bss) {
+                al.insns = "";
+                continue;
             }
+            int nb = al.nbits / this.width;
+            StringBuilder sb = new StringBuilder();
+            for (int j = 0; j < nb; j++) {
+                int addr = al.offset + j;
+                int idx = addr - sec.origin;
+                int w = 0;
+                if (idx >= 0 && idx < sec.outwords.size()) {
+                    w = sec.outwords.get(idx);
+                }
+                sb.append(String.format("%0" + digits + "X", w));
+                if (j != nb - 1) sb.append(' ');
+            }
+            al.insns = sb.toString();
         }
 
-        while (outwords.size() < this.codelen) {
-            outwords.add(0);
+        // Build flat binary by concatenating sections in deterministic order:
+        // .text, then .data, then any other progbits sections in insertion order. (.bss does not emit bytes.)
+        List<String> order = new ArrayList<>();
+        if (sections.containsKey(".text")) order.add(".text");
+        if (sections.containsKey(".data")) order.add(".data");
+        for (String k : sections.keySet()) {
+            if (k.equals(".bss")) continue;
+            if (order.contains(k)) continue;
+            order.add(k);
         }
 
-        this.fixups.clear();
-        return this.state();
+        final Map<String, Object> secMeta = new LinkedHashMap<>();
+        final List<Integer> flat = new ArrayList<>();
+        int flatOfsWords = 0;
+
+        for (String secName : order) {
+            SectionState sec = sections.get(secName);
+            if (sec == null || sec.bss) continue;
+
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("bss", false);
+            m.put("origin_words", sec.origin);
+            m.put("origin_bytes", wordsToBytes(sec.origin));
+            m.put("size_words", sec.outwords.size());
+            m.put("size_bytes", wordsToBytes(sec.outwords.size()));
+            m.put("flat_start_words", flatOfsWords);
+            m.put("flat_start_bytes", wordsToBytes(flatOfsWords));
+            secMeta.put(secName, m);
+
+            flat.addAll(sec.outwords);
+            flatOfsWords += sec.outwords.size();
+        }
+
+        // Record BSS metadata too (no bytes emitted)
+        if (sections.containsKey(".bss")) {
+            SectionState b = sections.get(".bss");
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("bss", true);
+            m.put("origin_words", b.origin);
+            m.put("origin_bytes", wordsToBytes(b.origin));
+            m.put("size_words", Math.max(0, b.ip - b.origin));
+            m.put("size_bytes", wordsToBytes(Math.max(0, b.ip - b.origin)));
+            secMeta.put(".bss", m);
+        }
+
+        final Map<String, Object> intermediate = new LinkedHashMap<>();
+        intermediate.put("section_order", order);
+        intermediate.put("sections", secMeta);
+
+        this.finalOutwords = flat;
+        this.finalIntermediate = intermediate;
+
+        return state();
     }
 
     public AssemblerState assembleFile(String text) {
@@ -1536,15 +1811,33 @@ case ".endmacro": {
     public AssemblerState state() {
         AssemblerState assemblerState = new AssemblerState();
 
-        assemblerState.ip = this.ip;
+        if (curSec == null) {
+            switchSection(".text", false);
+        }
+
+        List<Integer> out = (finalOutwords != null)
+                ? finalOutwords
+                : curSec.outwords;
+
+        assemblerState.ip = curSec.ip;
         assemblerState.line = this.linenum;
-        assemblerState.origin = this.origin;
-        assemblerState.codelen = this.codelen;
-        assemblerState.intermediate = new HashMap<>();
-        assemblerState.output = new ArrayList<>(this.outwords);
-        assemblerState.lines = new ArrayList<>(this.asmlines);
-        assemblerState.errors = new ArrayList<>(this.errors);
-        assemblerState.fixups = new ArrayList<>(this.fixups);
+        assemblerState.origin = curSec.origin;
+        assemblerState.codelen = out.size();
+
+        assemblerState.intermediate = (finalIntermediate != null)
+                ? finalIntermediate
+                : new HashMap<>();
+
+        assemblerState.output = new ArrayList<>(out);
+        assemblerState.lines = this.asmlines;
+        assemblerState.errors = this.errors;
+
+        // Aggregate outstanding fixups (mostly useful before finish()).
+        List<AssemblerFixup> fx = new ArrayList<>();
+        for (SectionState sec : sections.values()) {
+            fx.addAll(sec.fixups);
+        }
+        assemblerState.fixups = fx;
 
         return assemblerState;
     }

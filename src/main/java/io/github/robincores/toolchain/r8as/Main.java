@@ -13,15 +13,15 @@ public class Main {
     }
 
     // Load the configuration from r8.json in resources
-    System.out.println("Loading configuration...");
-    AssemblerSpec spec = loadConfigFromResources("/io/github/robincores/toolchain/r8as/R824.json");
-    if (spec == null) {
-      System.err.println("Failed to load assembler configuration.");
-      System.exit(1);
-    }
-    System.out.println("Configuration loaded successfully.");
+//    System.out.println("Loading configuration...");
+//    AssemblerSpec spec = loadConfigFromResources("/io/github/robincores/toolchain/r8as/r816.json");
+//    if (spec == null) {
+//      System.err.println("Failed to load assembler configuration.");
+//      System.exit(1);
+//    }
+//    System.out.println("Configuration loaded successfully.");
 
-    Assembler assembler = new Assembler(spec);
+    Assembler assembler = new Assembler();
 
     // Load the assembly file
     String asmFilename = args[0];

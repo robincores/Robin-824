@@ -1,56 +1,73 @@
 package io.github.robincores.r8;
 
+import io.github.robincores.r8.device.DisplayConfig;
+import io.github.robincores.r8.system.R816System;
+import io.github.robincores.r8.system.R8System;
 import javafx.application.Application;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
-import io.github.robincores.r8.system.R816System;
-import io.github.robincores.r8.system.R8CoreSystem;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * Application entry point.
+ * <p>
+ * Launches the selected system configuration, loads a demo binary,
+ * and runs the CPU on a background thread while the JavaFX canvas
+ * displays the VPU output.
+ * </p>
+ */
 public class Main extends Application {
-    private ExecutorService executorService;
+
+    private ExecutorService executor;
+    private R8System system;
 
     @Override
-    public void start(Stage primaryStage) {
-        try {
-            // Create Canvas for graphics
-            //Canvas canvas = new Canvas(720, 480);
-            Canvas canvas = new Canvas(640, 480);
+    public void start(Stage stage) throws IOException {
+        // ---- Select system ----
+        Canvas canvas = new Canvas();  // VPU will set the size
+        DisplayConfig config = R816System.displayConfig();
 
-            // Initialize the system configuration (CPU, memory, etc.)
-            //R8CoreSystem skylineSystem = new R824System(canvas);
-            R8CoreSystem skylineSystem = new R816System(canvas);
+        system = new R816System(canvas);
 
-            // Load the binary program into RAM at address 0x0000
-            skylineSystem.loadProgram("system.bin", 0x0000);
+        // Load built-in Mode X gradient demo (avoids stale system.bin files).
+        //system.loadProgram("modex_gradient.bin", 0x0000);
+        //system.loadProgram("modex_stripes.bin", 0x0000);
+        //system.loadProgram("modex_ramp.bin", 0x0000);
+        system.loadProgram("modex_quadrant_blue.bin", 0x0000);
 
-            // Main JavaFX layout
-            StackPane root = new StackPane(canvas);
-            Scene scene = new Scene(root, canvas.getWidth(), canvas.getHeight());
+        // ---- Build scene ----
+        StackPane root = new StackPane(canvas);
+        Scene scene = new Scene(root, config.canvasWidth(), config.canvasHeight());
 
-            primaryStage.setTitle("R816 System");
-            primaryStage.setScene(scene);
-            primaryStage.show();
+        stage.setTitle("R816 System");
+        stage.setScene(scene);
+        stage.setResizable(false);
+        stage.show();
 
-            // Handle application close event to stop the system and executor service
-            primaryStage.setOnCloseRequest(event -> {
-                skylineSystem.stop();  // Stop the emulator
-                executorService.shutdownNow();  // Shutdown the ExecutorService
-            });
+        // ---- Shutdown hook ----
+        stage.setOnCloseRequest(e -> {
+            system.stop();
+            executor.shutdownNow();
+        });
 
-            // ---
-            // Create an ExecutorService to handle the CPU execution on a separate thread
-            executorService = Executors.newSingleThreadExecutor();
-            executorService.submit(skylineSystem::run);  // Run the emulator in a separate thread
+        // ---- Run CPU on background thread ----
+        executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "r8-cpu");
+            t.setDaemon(true);
+            return t;
+        });
+        executor.submit(system::run);
+    }
 
-        } catch (IOException e) {
-            e.printStackTrace();  // Handle exception if the program file cannot be loaded
-        }
+    @Override
+    public void stop() {
+        if (system != null) system.stop();
+        if (executor != null) executor.shutdownNow();
     }
 
     public static void main(String[] args) {

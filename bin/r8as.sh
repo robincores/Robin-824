@@ -31,4 +31,4 @@ else
 fi
 
 # Invoke the assembler with the source and output files
-java -cp "$JAR_FILE" org.robincores.r8.assembler.Main "$SOURCE_FILE" "$OUTPUT_FILE"
+java -cp "$JAR_FILE" io.github.robincores.toolchain.r8as.Main "$SOURCE_FILE" "$OUTPUT_FILE"

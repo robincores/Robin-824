@@ -1,13 +1,15 @@
 package io.github.robincores.r8.cpu;
 
+import io.github.robincores.r8.bus.Bus;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 
 public final class R824 extends R8Core {
 
-    public R824(Memory memory) {
-        super(memory, 0xFF_FFFF, 3, 0xFF_FFFF, 0x80_0000);
+    public R824(Bus bus) {
+        super(bus, 0xFF_FFFF, 3, 0xFF_FFFF, 0x80_0000);
     }
 
     // ---
@@ -62,7 +64,7 @@ public final class R824 extends R8Core {
                 for (int i = 0; i < 16; i++) {
                     System.out.printf("%06x", m);
                     for (int j = 0; j < 16; j++) {
-                        System.out.printf(" | %02x", memory.read(m));
+                        System.out.printf(" | %02x", bus.read8(m));
                         m = (m + 1) & 0xFF_FFFF;
                     }
                     System.out.println();
@@ -95,7 +97,7 @@ public final class R824 extends R8Core {
             }
             case PRINT_STRING -> {
                 int s = BReg & 0xFF_FFFF, c;
-                while ((c = memory.read(s++)) != 0) {
+                while ((c = bus.read8(s++)) != 0) {
                     System.out.print((char) (c & 0xFF)); // ASCII
                 }
                 System.out.println();
@@ -113,9 +115,9 @@ public final class R824 extends R8Core {
                     int length = Math.min(line.length(), maxlen - 1);  // Ensure string fits in maxlen
 
                     for (int i = 0; i < length; i++) {
-                        memory.write(buffer + i, (byte) line.charAt(i));  // Write each character to memory
+                        bus.write8(buffer + i, (byte) line.charAt(i));  // Write each character to memory
                     }
-                    memory.write(buffer + length, (byte) 0);  // Null-terminate string
+                    bus.write8(buffer + length, (byte) 0);  // Null-terminate string
 
                     AReg = length;  // Success
                 } catch (IOException e) {
