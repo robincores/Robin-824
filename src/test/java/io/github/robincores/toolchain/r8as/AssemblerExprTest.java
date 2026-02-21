@@ -17,7 +17,7 @@ public class AssemblerExprTest {
 
         String src = """
                 .arch r816
-                .data 0x10+1, 2*3, (7+1)
+                .byte 0x10+1, 2*3, (7+1)
                 """;
 
         AssemblerState st = as.assembleFile(src);
@@ -47,9 +47,9 @@ public class AssemblerExprTest {
 
         String src = """
                 .arch r816
-                .data 1
+                .byte 1
                 .align 4+4
-                .data 2
+                .byte 2
                 """;
 
         AssemblerState st = as.assembleFile(src);

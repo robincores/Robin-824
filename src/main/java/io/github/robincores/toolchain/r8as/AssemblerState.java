@@ -14,18 +14,14 @@ public class AssemblerState {
   List<AssemblerError> errors; // List of errors encountered during assembly
   List<AssemblerFixup> fixups; // List of unresolved symbols and addresses to fix up later
 
-  // Constructor to initialize the assembler state
-//  public AssemblerState(int ip, int line, int origin, int codelen, Object intermediate, List<Integer> output, List<AssemblerLine> lines, List<AssemblerError> errors, List<AssemblerFixup> fixups) {
-//    this.ip = ip;
-//    this.line = line;
-//    this.origin = origin;
-//    this.codelen = codelen;
-//    this.intermediate = intermediate;
-//    this.output = output;
-//    this.lines = lines;
-//    this.errors = errors;
-//    this.fixups = fixups;
-//  }
+  // inside AssemblerState
+  public java.util.List<AssemblerError> getErrors() { return errors; }
+  public java.util.List<Integer> getOutput() { return output; }
+
+  // optional, nice-to-have:
+  public Object getIntermediate() { return intermediate; }
+  public java.util.List<AssemblerLine> getLines() { return lines; }
+  public java.util.List<AssemblerFixup> getFixups() { return fixups; }
 
   public AssemblerState() {}
 }

@@ -814,66 +814,83 @@ public abstract class R8Core implements InterruptSink {
             // -------------------------------------------------------------
             case 0b0_10000_10 -> { // 0x42: BEQ k (IPtr = IPtr + k, B == A, A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (BReg == AReg) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointer
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
             case 0b0_10001_10 -> { // 0x46: BNE k (IPtr = IPtr + k, B != A, A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (BReg != AReg) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointer
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
-            case 0b0_10010_10 -> // 0x4A: (reserved)
-                    cycles += S_IFETCH + S_DECODE;
+            case 0b0_10010_10 -> {// 0x4A: BRA k (IPtr = IPtr + )
+                cycles += S_IFETCH + S_DECODE + S_MEM_READ;
+                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
+                setIPtr(IPtr + offset);// Apply offset to instruction pointer
+            }
             case 0b0_10011_10 -> // 0x4E: (reserved)
                     cycles += S_IFETCH + S_DECODE;
             // -------------------------------------------------------------
             case 0b0_10100_10 -> { // 0x52: BLT k (IPtr = IPtr + k, B < A, A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (BReg < AReg) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointer
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
             case 0b0_10101_10 -> { // 0x56: BLTU k (IPtr = IPtr + k, B < A (unsigned), A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (Integer.compareUnsigned(BReg, AReg) < 0) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointers
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
             case 0b0_10110_10 -> { // 0x5A: BGE k (IPtr = IPtr + k, B >= A, A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (BReg >= AReg) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointers
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
             case 0b0_10111_10 -> { // 0x5E: BGEU k (IPtr = IPtr + k, B >= A (unsigned), A = C)
                 cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 if (Integer.compareUnsigned(BReg, AReg) >= 0) {
+                    int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                     setIPtr(IPtr + offset);// Apply offset to instruction pointer
+                } else {
+                    setIPtr(IPtr + 1);
                 }
                 AReg = CReg; // A takes value of C
             }
             // -------------------------------------------------------------
-            case 0b0_11000_10 -> { // 0x62: J k (IPtr = IPtr + k)
-                cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
+            case 0b0_11000_10 -> { // 0x62: J w (IPtr = IPtr + w)
+                cycles += S_IFETCH + S_DECODE + memReadWordCycles();
+                int offset = normalizeWord(fetchWordOperand());
+                //int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 setIPtr(IPtr + offset);// Apply offset to instruction pointer
             }
-            case 0b0_11001_10 -> { // 0x66: JAL k [IPtr = IPtr + k, A = PC + 1]
-                cycles += S_IFETCH + S_DECODE + S_MEM_READ;
-                int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
+            case 0b0_11001_10 -> { // 0x66: JAL w [IPtr = IPtr + w, A = PC + 1]
+                cycles += S_IFETCH + S_DECODE + memReadWordCycles();
+                int offset = normalizeWord(fetchWordOperand());
+                //int offset = signExtend8to32(fetchByteOperand()); // signed byte for branch offset
                 setAReg(maskAddr(IPtr));      // return = next instruction (after imm8)
                 setIPtr(IPtr + offset);// Apply offset to instruction pointer
             }

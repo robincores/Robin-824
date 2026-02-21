@@ -1,9 +1,16 @@
 package io.github.robincores.r8.system;
 
 import io.github.robincores.r8.bus.BusMap;
-import io.github.robincores.r8.cpu.R8Core;
 import io.github.robincores.r8.cpu.R816;
-import io.github.robincores.r8.device.*;
+import io.github.robincores.r8.device.APU;
+import io.github.robincores.r8.device.DisplayConfig;
+import io.github.robincores.r8.device.Keyboard;
+import io.github.robincores.r8.device.PIT;
+import io.github.robincores.r8.device.RAM;
+import io.github.robincores.r8.device.SysMMIO;
+import io.github.robincores.r8.device.VPU;
+import io.github.robincores.r8.device.VideoWindow;
+import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 
 import static io.github.robincores.r8.cpu.R8Core.EXTERNAL_INTERRUPT_MASK;
@@ -15,8 +22,10 @@ import static io.github.robincores.r8.cpu.R8Core.TIMER_INTERRUPT_MASK;
  * <h3>Memory Map (v1)</h3>
  * <pre>
  *   0x0000–0xBEFF   RAM                    (48K - 256 bytes)
- *   0xBF00-0xBFFF   MMIO                   (256 bytes)
- *      0xBFE0–0xBFEF   PIT timer MMIO         (16 bytes)
+ *   0xBF00–0xBFFF   MMIO                   (256 bytes)
+ *      0xBF00–0xBF0F   Keyboard MMIO          (16 bytes)
+ *      0xBF10–0xBF1F   PIT timer MMIO         (16 bytes)
+ *      0xBF20–0xBFEF   APU MMIO               (208 bytes)
  *      0xBFF0–0xBFFF   System MMIO            (16 bytes)  [VIDWIN, ...]
  *   0xC000–0xFFFF   Video Window           (16K)       [VRAM plane or VPU MMIO]
  * </pre>
@@ -31,7 +40,8 @@ import static io.github.robincores.r8.cpu.R8Core.TIMER_INTERRUPT_MASK;
  *   <li>Display output is 640×400 in a JavaFX window (no smoothing).</li>
  * </ul>
  */
-public final class R816System extends AbstractSystem {
+public final class R816System extends AbstractSystem
+        implements FxSystem {
 
     /**
      * Target CPU frequency for pacing (emulator): 12.5 MHz.
@@ -54,11 +64,15 @@ public final class R816System extends AbstractSystem {
 
     // Memory map constants
     private static final int RAM_BASE = 0x0000;
-    private static final int RAM_SIZE = 0xBF00;  // 0x0000..0xBEFF
+    private static final int RAM_SIZE = 0xBF00;          // 0x0000..0xBEFF
 
-    private static final int PIT_BASE = 0xBFE0;  // 0xBFE0–0xBFEF
-    private static final int SYS_MMIO_BASE = 0xBFF0;  // 0xBFF0–0xBFFF
-    private static final int VIDEO_WIN_BASE = 0xC000;  // 0xC000–0xFFFF
+    private static final int KBD_BASE = 0xBF00;          // 0xBF00–0xBF0F (16 bytes)
+    private static final int PIT_BASE = 0xBF10;          // 0xBF10–0xBF1F
+    private static final int APU_BASE = 0xBF20;          // 0xBF20–0xBFEF
+    private static final int SYS_MMIO_BASE = 0xBFF0;     // 0xBFF0–0xBFFF
+    private static final int VIDEO_WIN_BASE = 0xC000;    // 0xC000–0xFFFF
+
+    private final Keyboard keyboard;
 
     public R816System(Canvas canvas) {
         BusMap bus = new BusMap(0xFFFF);
@@ -68,9 +82,14 @@ public final class R816System extends AbstractSystem {
         setCpuHz(CPU_HZ);
 
         // --- RAM: 0x0000–0xBEFF (48K - 256 bytes)
-        bus.map(RAM_BASE, new RAM(RAM_SIZE));
+        RAM ram = new RAM(RAM_SIZE);
+        bus.map(RAM_BASE, ram);
 
-        // --- PIT: 0xBFE0–0xBFEF
+        // --- Keyboard: 0xBF00–0xBF0F
+        keyboard = new Keyboard(cpu, EXTERNAL_INTERRUPT_MASK);
+        bus.map(KBD_BASE, keyboard);
+
+        // --- PIT: 0xBF10–0xBF1F
         int mtimeBits = 32;
         int cyclesPerTick = 1; // MTIME increments every CPU cycle
         PIT pit = new PIT(cpu, TIMER_INTERRUPT_MASK, mtimeBits, cyclesPerTick);
@@ -79,6 +98,11 @@ public final class R816System extends AbstractSystem {
         // --- System MMIO: 0xBFF0–0xBFFF
         SysMMIO sys = new SysMMIO();
         bus.map(SYS_MMIO_BASE, sys);
+
+        // --- APU: 0xBF20–0xBFEF (hybrid PSG + 4-voice PCM)
+        // NOTE: Must be ticked, otherwise no audio samples are produced.
+        APU apu = new APU(ram, CPU_HZ, cpu, EXTERNAL_INTERRUPT_MASK);
+        bus.map(APU_BASE, apu);
 
         // --- VPU (not directly mapped; exposed via VideoWindow when WIN_MMIO=1)
         VPU vpu = new VPU(
@@ -93,7 +117,13 @@ public final class R816System extends AbstractSystem {
 
         init(cpu, bus);
         addTickable(pit);
+        addTickable(apu);
         addTickable(vpu);
+    }
+
+    @Override
+    public void attach(Scene scene) {
+        keyboard.attach(scene);
     }
 
     /**

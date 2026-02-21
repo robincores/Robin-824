@@ -14,7 +14,7 @@ public class AssemblerMacroTest {
         var st = as.assembleFile("""
                 .arch r816
                 .macro EMIT3 a,b,c
-                  .data \\a, \\b, \\c
+                  .byte \\a, \\b, \\c
                 .endm
                 EMIT3 1,2,3
                 """);
@@ -28,7 +28,7 @@ public class AssemblerMacroTest {
         var st = as.assembleFile("""
                 .arch r816
                 .macro A x
-                  .data \\x
+                  .byte \\x
                 .endm
                 .macro B y
                   A \\y
@@ -46,7 +46,7 @@ public class AssemblerMacroTest {
                 .arch r816
                 .macro MARK
                 .Lx\\@:
-                  .data 1
+                  .byte 1
                 .endm
                 MARK
                 MARK

@@ -93,31 +93,30 @@ public class Assembler {
     private final java.util.Deque<String> includeStack = new java.util.ArrayDeque<>();
     private int maxIncludeDepth = 32;
 
-  // Macro handling (.macro/.endm)
-  private static final class MacroDef {
-    final String name;
-    final String key;
-    final List<String> params;
-    final List<String> bodyLines;
+    // Macro handling (.macro/.endm)
+    private static final class MacroDef {
+        final String name;
+        final String key;
+        final List<String> params;
+        final List<String> bodyLines;
 
-    MacroDef(String name, String key, List<String> params, List<String> bodyLines) {
-      this.name = name;
-      this.key = key;
-      this.params = params;
-      this.bodyLines = bodyLines;
+        MacroDef(String name, String key, List<String> params, List<String> bodyLines) {
+            this.name = name;
+            this.key = key;
+            this.params = params;
+            this.bodyLines = bodyLines;
+        }
     }
-  }
 
-  private final Map<String, MacroDef> macros = new HashMap<>();
-  private boolean macroDefActive = false;
-  private String macroDefName = null;
-  private String macroDefKey = null;
-  private List<String> macroDefParams = null;
-  private List<String> macroDefBody = null;
-  private long macroUniqueCounter = 0;
-  private final Deque<String> macroExpansionStack = new ArrayDeque<>();
-  private static final int MAX_MACRO_EXPANSION_DEPTH = 64;
-
+    private final Map<String, MacroDef> macros = new HashMap<>();
+    private boolean macroDefActive = false;
+    private String macroDefName = null;
+    private String macroDefKey = null;
+    private List<String> macroDefParams = null;
+    private List<String> macroDefBody = null;
+    private long macroUniqueCounter = 0;
+    private final Deque<String> macroExpansionStack = new ArrayDeque<>();
+    private static final int MAX_MACRO_EXPANSION_DEPTH = 64;
 
 
     // Better diagnostics (source + column)
@@ -148,7 +147,7 @@ public class Assembler {
         // (If the user never mentions sections, behavior matches legacy single-section assembly.)
         switchSection(".text", false);
     }
-    
+
     private static String normalizeSectionName(String raw) {
         if (raw == null) return ".text";
         String s = raw.trim();
@@ -175,18 +174,21 @@ public class Assembler {
     }
 
 
-/** Adds a filesystem include search path (used by .include/.module). */
+    /**
+     * Adds a filesystem include search path (used by .include/.module).
+     */
     public Assembler addIncludePath(java.nio.file.Path dir) {
         if (dir != null) includeSearchPaths.add(dir);
         return this;
     }
 
-    /** Sets max nested include depth (default 32). */
+    /**
+     * Sets max nested include depth (default 32).
+     */
     public Assembler setMaxIncludeDepth(int depth) {
         if (depth > 0) this.maxIncludeDepth = depth;
         return this;
     }
-
 
 
     // Converts a rule to a regular expression and stores it
@@ -235,7 +237,7 @@ public class Assembler {
                 // numbers/labels OR simple expressions (for forward fixups, e.g. label+2)
                 String atom = "(?:0x[0-9a-f_]+|\\$[0-9a-f_]+|[0-9]+[fb]|[0-9][0-9_]*|[a-z_][a-z0-9_]*|\\.)";
                 String op = "(?:<<|>>|\\+|\\-|\\*|/|%|&|\\^|\\|)";
-                replacement = "([-+]?(?:~+)?"+atom+"(?:"+op+"(?:~+)?"+atom+")*)";
+                replacement = "([-+]?(?:~+)?" + atom + "(?:" + op + "(?:~+)?" + atom + ")*)";
             }
 
             matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
@@ -457,9 +459,83 @@ public class Assembler {
         return data;
     }
 
+    // Emit sized integers (e.g. 16-bit, 32-bit) as a sequence of assembler-words (width bits).
+    // Supports forward refs by creating fixups per emitted word-chunk.
+    private int[] parseSizedData(String[] exprs, int bits, boolean littleEndian) {
+        if (curSec == null) switchSection(".text", false);
+
+        if ((bits % this.width) != 0) {
+            fatal("Cannot emit " + bits + "-bit values when width=" + this.width + " (bits must be multiple of width)");
+            return new int[0];
+        }
+
+        int chunks = bits / this.width; // e.g. width=8, bits=16 => 2 bytes
+        int startIp = curSec.ip;
+        int[] out = new int[exprs.length * chunks];
+
+        for (int i = 0; i < exprs.length; i++) {
+            String expr = exprs[i];
+            int baseIp = startIp + (i * chunks);
+
+            long v = parseConst64(expr, bits);
+            if (isNaN(v)) {
+                Long ev;
+                try {
+                    ev = evalExprAllowLocals(expr, baseIp);
+                } catch (IllegalArgumentException ex) {
+                    warning("Bad expression '" + expr + "': " + ex.getMessage(), this.linenum);
+                    ev = 0L;
+                }
+
+                if (ev == null) {
+                    // forward ref: create one fixup per chunk
+                    for (int k = 0; k < chunks; k++) {
+                        int srcofs = littleEndian
+                                ? (k * this.width)
+                                : ((chunks - 1 - k) * this.width);
+
+                        curSec.fixups.add(new AssemblerFixup(
+                                expr,
+                                baseIp + k,     // destination word address
+                                bits,           // source size (whole value)
+                                srcofs,         // shift-right before masking
+                                0,              // dstofs (bit offset within destination word)
+                                this.width,     // dstlen (whole word)
+                                this.linenum,
+                                false,          // iprel
+                                0,              // ipofs
+                                1,              // ipmul
+                                "big"           // IMPORTANT: do NOT swap here; we control order via srcofs
+                        ));
+                        out[i * chunks + k] = 0;
+                    }
+                    continue;
+                } else {
+                    v = ev;
+                }
+            }
+
+            long max = mask64(bits);
+            long min = signedMin(bits);
+            if (bits < 64 && (v < min || v > max)) {
+                warning("Value " + v + " does not fit in " + bits + " bits", this.linenum);
+            }
+            v &= max;
+
+            for (int k = 0; k < chunks; k++) {
+                int shift = littleEndian
+                        ? (k * this.width)
+                        : ((chunks - 1 - k) * this.width);
+                out[i * chunks + k] = (int) ((v >>> shift) & mask64(this.width));
+            }
+        }
+
+        return out;
+    }
+
     /**
      * Bytes per emitted word.
-     *
+     * <p>
      * R8 width=8 => 1 byte
      * RV32 width=32 => 4 bytes
      */
@@ -478,9 +554,9 @@ public class Assembler {
         return bytes / bpw;
     }
 
-int wordsToBytes(int words) {
-    return words * bytesPerWord();
-}
+    int wordsToBytes(int words) {
+        return words * bytesPerWord();
+    }
 
 
     void alignIPBytes(int alignBytes) {
@@ -545,7 +621,7 @@ int wordsToBytes(int words) {
 
         try {
             if (sl.startsWith("0x")) return sign * Long.parseLong(sl.substring(2), 16);
-            if (sl.startsWith("$"))  return sign * Long.parseLong(sl.substring(1), 16);
+            if (sl.startsWith("$")) return sign * Long.parseLong(sl.substring(1), 16);
             return sign * Long.parseLong(sl, 10);
         } catch (NumberFormatException e) {
             return Long.MIN_VALUE;
@@ -641,9 +717,9 @@ int wordsToBytes(int words) {
 
     /**
      * Fold constant expressions inside operands so JSON rule matching can stay simple.
-     *
+     * <p>
      * Example: "i 0x1234+2" -> "i 4662" (decimal)
-     *
+     * <p>
      * This is intentionally conservative: it only folds when the expression can be
      * evaluated with the current symbol table and dot (.). If it can\'t be evaluated
      * we leave it unchanged.
@@ -765,6 +841,7 @@ int wordsToBytes(int words) {
         char c = s.charAt(s.length() - 1);
         return c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '(' || c == ',';
     }
+
     // Build an instruction based on the matched rule
     public AssemblerLineResult buildInstruction(AssemblerRule rule, Matcher m) {
         long opcode = 0L;
@@ -854,10 +931,10 @@ int wordsToBytes(int words) {
                         xl = 0;
                     } else {
                         xl = ev;
-                    if (v.iprel) {
-                        long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
-                        xl = (xl - curSec.ip) * ipmul - v.ipofs;
-                    }
+                        if (v.iprel) {
+                            long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
+                            xl = (xl - curSec.ip) * ipmul - v.ipofs;
+                        }
                         long max = mask64(v.bits);
                         long min = signedMin(v.bits);
                         if (v.bits < 64 && (xl < min || xl > max)) {
@@ -943,12 +1020,12 @@ int wordsToBytes(int words) {
 
     /**
      * Load an architecture JSON either from disk or from classpath resources.
-     *
+     * <p>
      * Search order:
-     *   1) exact filesystem path
-     *   2) classpath: /io/github/robincores/toolchain/r8as/<name>.json
-     *   3) classpath: /io/github/robincores/toolchain/r8as/arch/<name>.json
-     *   4) classpath: /arch/<name>.json
+     * 1) exact filesystem path
+     * 2) classpath: /io/github/robincores/toolchain/r8as/<name>.json
+     * 3) classpath: /io/github/robincores/toolchain/r8as/arch/<name>.json
+     * 4) classpath: /arch/<name>.json
      */
     public AssemblerSpec loadJSON(String path) {
         try {
@@ -1005,8 +1082,11 @@ int wordsToBytes(int words) {
             switchSection(".bss", true);
             return;
         }
-        // ".data" is ambiguous: if it has args, it's a data-emission directive; if not, it's a section selector.
-        if (cmd.equals(".data") && tokens.length == 1) {
+        if (cmd.equals(".data")) {
+            if (tokens.length != 1) {
+                fatal(".data is a section selector only. Use .byte to emit numeric values.");
+                return;
+            }
             switchSection(".data", false);
             return;
         }
@@ -1144,9 +1224,82 @@ int wordsToBytes(int words) {
                 break;
             }
 
-            case ".data": {
+            case ".incbin": {
                 if (tokens.length < 2) {
-                    // handled above when tokens.length == 1 (section selector)
+                    fatal("Usage: .incbin \"file\"[, offset[, length]]");
+                    break;
+                }
+
+                String p0 = stripTrailingComma(tokens[1]);
+                String binPath = unquote(p0);
+
+                int offset = 0;
+                int length = -1;
+
+                if (tokens.length >= 3) {
+                    String t = stripTrailingComma(tokens[2]);
+                    try {
+                        Long v = evalExprAllowLocals(t, curSec.ip);
+                        offset = (v == null) ? 0 : (int) (long) v;
+                    } catch (IllegalArgumentException ex) {
+                        fatal("Bad offset expression '" + t + "': " + ex.getMessage());
+                        break;
+                    }
+                }
+
+                if (tokens.length >= 4) {
+                    String t = stripTrailingComma(tokens[3]);
+                    try {
+                        Long v = evalExprAllowLocals(t, curSec.ip);
+                        length = (v == null) ? -1 : (int) (long) v;
+                    } catch (IllegalArgumentException ex) {
+                        fatal("Bad length expression '" + t + "': " + ex.getMessage());
+                        break;
+                    }
+                }
+
+                if (offset < 0) {
+                    fatal(".incbin offset must be >= 0");
+                    break;
+                }
+                if (length < -1) {
+                    fatal(".incbin length must be >= 0 (or omitted)");
+                    break;
+                }
+
+                if (bytesPerWord() != 1) {
+                    fatal(".incbin currently requires width=8 (bytesPerWord=1)");
+                    break;
+                }
+
+                byte[] bytes = loadExternalBinary(binPath, java.util.List.of("", "include/", "assets/"));
+                if (bytes == null) {
+                    fatal("Cannot find/read binary: " + binPath);
+                    break;
+                }
+
+                if (offset > bytes.length) {
+                    fatal(".incbin offset beyond end of file (" + offset + " > " + bytes.length + ")");
+                    break;
+                }
+
+                int available = bytes.length - offset;
+                int take = (length == -1) ? available : Math.min(length, available);
+
+                if (curSec.bss) {
+                    // Reserve space only
+                    addWords(new int[take]);
+                } else {
+                    int[] out = new int[take];
+                    for (int i = 0; i < take; i++) out[i] = bytes[offset + i] & 0xFF;
+                    addWords(out);
+                }
+                break;
+            }
+
+            case ".byte": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .byte <expr>[, <expr> ...]");
                     break;
                 }
                 int n = tokens.length - 1;
@@ -1160,9 +1313,10 @@ int wordsToBytes(int words) {
                 break;
             }
 
+            case ".ascii":
             case ".string": {
                 if (tokens.length < 2) {
-                    fatal("Usage: .string \"...\"");
+                    fatal("Usage: .string/.ascii \"...\"");
                     break;
                 }
                 String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
@@ -1173,6 +1327,58 @@ int wordsToBytes(int words) {
                     addWords(new int[data.length]);
                 } else {
                     addWords(data);
+                }
+                break;
+            }
+
+            case ".asciiz":
+            case ".asciz": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .asciiz/.asciz \"...\"");
+                    break;
+                }
+                String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
+                raw = unquote(raw);
+                int[] data = stringToData(raw);
+
+                if (curSec.bss) {
+                    addWords(new int[data.length + 1]); // reserve + terminator
+                } else {
+                    addWords(data);
+                    addWords(new int[]{0});
+                }
+                break;
+            }
+
+            case ".word": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .word <expr>[, <expr> ...]");
+                    break;
+                }
+                String[] exprs = Arrays.copyOfRange(tokens, 1, tokens.length);
+
+                if (curSec.bss) {
+                    // reserve 2 bytes per item when width=8; generally: (16/width) words per item
+                    int chunks = 16 / this.width;
+                    addWords(new int[exprs.length * chunks]);
+                } else {
+                    addWords(parseSizedData(exprs, 16, true)); // little-endian
+                }
+                break;
+            }
+
+            case ".dword": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .dword <expr>[, <expr> ...]");
+                    break;
+                }
+                String[] exprs = Arrays.copyOfRange(tokens, 1, tokens.length);
+
+                if (curSec.bss) {
+                    int chunks = 32 / this.width;
+                    addWords(new int[exprs.length * chunks]);
+                } else {
+                    addWords(parseSizedData(exprs, 32, true)); // little-endian
                 }
                 break;
             }
@@ -1203,12 +1409,24 @@ int wordsToBytes(int words) {
                 if (c == '\\' && i + 1 < t.length()) {
                     char n = t.charAt(++i);
                     switch (n) {
-                        case 'n': out.append('\n'); break;
-                        case 'r': out.append('\r'); break;
-                        case 't': out.append('\t'); break;
-                        case '\\': out.append('\\'); break;
-                        case '"': out.append('"'); break;
-                        default: out.append(n); break;
+                        case 'n':
+                            out.append('\n');
+                            break;
+                        case 'r':
+                            out.append('\r');
+                            break;
+                        case 't':
+                            out.append('\t');
+                            break;
+                        case '\\':
+                            out.append('\\');
+                            break;
+                        case '"':
+                            out.append('"');
+                            break;
+                        default:
+                            out.append(n);
+                            break;
                     }
                 } else {
                     out.append(c);
@@ -1257,167 +1475,168 @@ int wordsToBytes(int words) {
     }
 
 
-  private void beginMacroDef(String[] tokens) {
-    String name = tokens[1];
-    String key = name.toLowerCase(Locale.ROOT);
+    private void beginMacroDef(String[] tokens) {
+        String name = tokens[1];
+        String key = name.toLowerCase(Locale.ROOT);
 
-    if (macroDefActive) {
-      fatal("Nested .macro is not supported");
-      return;
-    }
-    if (macros.containsKey(key)) {
-      fatal("Macro already defined: " + name);
-      return;
-    }
+        if (macroDefActive) {
+            fatal("Nested .macro is not supported");
+            return;
+        }
+        if (macros.containsKey(key)) {
+            fatal("Macro already defined: " + name);
+            return;
+        }
 
-    List<String> params = parseMacroParams(tokens);
-    macroDefActive = true;
-    macroDefName = name;
-    macroDefKey = key;
-    macroDefParams = params;
-    macroDefBody = new ArrayList<>();
-  }
+        List<String> params = parseMacroParams(tokens);
+        macroDefActive = true;
+        macroDefName = name;
+        macroDefKey = key;
+        macroDefParams = params;
+        macroDefBody = new ArrayList<>();
+    }
 
     private List<String> parseMacroParams(String[] tokens) {
-    if (tokens.length <= 2) {
-      return Collections.emptyList();
+        if (tokens.length <= 2) {
+            return Collections.emptyList();
+        }
+
+        // Join everything after ".macro <name>" back into one string so we can parse:
+        //   .macro foo a,b,c
+        //   .macro foo a b c    (also allowed)
+        StringBuilder sb = new StringBuilder();
+        for (int i = 2; i < tokens.length; i++) {
+            if (i > 2) sb.append(' ');
+            sb.append(tokens[i]);
+        }
+        String rest = sb.toString().trim();
+        if (rest.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> commaSplit = splitTopLevelCommas(rest);
+
+        // If there are no commas, allow whitespace-separated params (GNU-ish style)
+        if (commaSplit.size() == 1 && !rest.contains(",")) {
+            String[] ws = rest.trim().isEmpty() ? new String[0] : rest.trim().split("\\s+");
+            return Arrays.stream(ws).map(String::trim).filter(s -> !s.isEmpty()).toList();
+        }
+
+        return commaSplit.stream().map(String::trim).filter(s -> !s.isEmpty()).toList();
     }
 
-    // Join everything after ".macro <name>" back into one string so we can parse:
-    //   .macro foo a,b,c
-    //   .macro foo a b c    (also allowed)
-    StringBuilder sb = new StringBuilder();
-    for (int i = 2; i < tokens.length; i++) {
-      if (i > 2) sb.append(' ');
-      sb.append(tokens[i]);
-    }
-    String rest = sb.toString().trim();
-    if (rest.isEmpty()) {
-      return Collections.emptyList();
-    }
+    private void finishMacroDef() {
+        if (!macroDefActive) {
+            fatal(".endm without active .macro");
+            return;
+        }
 
-    List<String> commaSplit = splitTopLevelCommas(rest);
+        MacroDef def = new MacroDef(macroDefName, macroDefKey, macroDefParams, new ArrayList<>(macroDefBody));
+        macros.put(def.key, def);
 
-    // If there are no commas, allow whitespace-separated params (GNU-ish style)
-    if (commaSplit.size() == 1 && !rest.contains(",")) {
-      String[] ws = rest.trim().isEmpty() ? new String[0] : rest.trim().split("\\s+");
-      return Arrays.stream(ws).map(String::trim).filter(s -> !s.isEmpty()).toList();
+        macroDefActive = false;
+        macroDefName = null;
+        macroDefKey = null;
+        macroDefParams = null;
+        macroDefBody = null;
     }
 
-    return commaSplit.stream().map(String::trim).filter(s -> !s.isEmpty()).toList();
-  }
+    private void expandAndAssembleMacro(MacroDef macro, List<String> args, String callSource, int callLineNo) {
+        if (macroExpansionStack.contains(macro.key)) {
+            fatal("macro recursion detected: " + macro.name);
+            return;
+        }
+        if (macroExpansionStack.size() >= MAX_MACRO_EXPANSION_DEPTH) {
+            fatal("macro expansion depth exceeded for: " + macro.name);
+            return;
+        }
+        if (args.size() != macro.params.size()) {
+            fatal("macro \"" + macro.name + "\" expects " + macro.params.size() + " args, got " + args.size());
+            return;
+        }
 
-  private void finishMacroDef() {
-    if (!macroDefActive) {
-      fatal(".endm without active .macro");
-      return;
-    }
+        long uniq = macroUniqueCounter++;
+        Map<String, String> argMap = new HashMap<>();
+        for (int i = 0; i < macro.params.size(); i++) {
+            argMap.put(macro.params.get(i), args.get(i).trim());
+        }
 
-    MacroDef def = new MacroDef(macroDefName, macroDefKey, macroDefParams, new ArrayList<>(macroDefBody));
-    macros.put(def.key, def);
-
-    macroDefActive = false;
-    macroDefName = null;
-    macroDefKey = null;
-    macroDefParams = null;
-    macroDefBody = null;
-  }
-
-  private void expandAndAssembleMacro(MacroDef macro, List<String> args, String callSource, int callLineNo) {
-    if (macroExpansionStack.contains(macro.key)) {
-      fatal("macro recursion detected: " + macro.name);
-      return;
-    }
-    if (macroExpansionStack.size() >= MAX_MACRO_EXPANSION_DEPTH) {
-      fatal("macro expansion depth exceeded for: " + macro.name);
-      return;
-    }
-    if (args.size() != macro.params.size()) {
-      fatal("macro \"" + macro.name + "\" expects " + macro.params.size() + " args, got " + args.size());
-      return;
-    }
-
-    long uniq = macroUniqueCounter++;
-    Map<String, String> argMap = new HashMap<>();
-    for (int i = 0; i < macro.params.size(); i++) {
-      argMap.put(macro.params.get(i), args.get(i).trim());
-    }
-
-    macroExpansionStack.push(macro.key);
-    try {
-      for (String bodyLine : macro.bodyLines) {
-        if (aborted) return;
-        String expanded = expandMacroLine(bodyLine, macro, argMap, uniq);
-        assembleAt(expanded, callSource, callLineNo);
-      }
-    } finally {
-      macroExpansionStack.pop();
-    }
-  }
-
-  private String expandMacroLine(String line, MacroDef macro, Map<String, String> argMap, long uniq) {
-    if (line.indexOf('\\') < 0) return line;
-
-    StringBuilder out = new StringBuilder(line.length() + 16);
-    int n = line.length();
-    for (int i = 0; i < n; i++) {
-      char c = line.charAt(i);
-      if (c != '\\' || i == n - 1) {
-        out.append(c);
-        continue;
-      }
-
-      char next = line.charAt(i + 1);
-
-      if (next == '@') {
-        out.append(uniq);
-        i++;
-        continue;
-      }
-
-      if (Character.isDigit(next)) {
-        int j = i + 1;
-        while (j < n && Character.isDigit(line.charAt(j))) j++;
-        String num = line.substring(i + 1, j);
+        macroExpansionStack.push(macro.key);
         try {
-          int idx = Integer.parseInt(num) - 1;
-          if (idx >= 0 && idx < macro.params.size()) {
-            String pname = macro.params.get(idx);
-            String repl = argMap.get(pname);
-            if (repl != null) {
-              out.append(repl);
-              i = j - 1;
-              continue;
+            for (String bodyLine : macro.bodyLines) {
+                if (aborted) return;
+                String expanded = expandMacroLine(bodyLine, macro, argMap, uniq);
+                assembleAt(expanded, callSource, callLineNo);
             }
-          }
-        } catch (NumberFormatException ignored) {
+        } finally {
+            macroExpansionStack.pop();
         }
-        out.append(c);
-        continue;
-      }
-
-      if (Character.isLetter(next) || next == '_') {
-        int j = i + 1;
-        while (j < n) {
-          char ch = line.charAt(j);
-          if (!(Character.isLetterOrDigit(ch) || ch == '_')) break;
-          j++;
-        }
-        String ident = line.substring(i + 1, j);
-        String repl = argMap.get(ident);
-        if (repl != null) {
-          out.append(repl);
-          i = j - 1;
-          continue;
-        }
-      }
-
-      // Unknown escape; keep the backslash as-is.
-      out.append(c);
     }
 
-    return out.toString();
-  }
+    private String expandMacroLine(String line, MacroDef macro, Map<String, String> argMap, long uniq) {
+        if (line.indexOf('\\') < 0) return line;
+
+        StringBuilder out = new StringBuilder(line.length() + 16);
+        int n = line.length();
+        for (int i = 0; i < n; i++) {
+            char c = line.charAt(i);
+            if (c != '\\' || i == n - 1) {
+                out.append(c);
+                continue;
+            }
+
+            char next = line.charAt(i + 1);
+
+            if (next == '@') {
+                out.append(uniq);
+                i++;
+                continue;
+            }
+
+            if (Character.isDigit(next)) {
+                int j = i + 1;
+                while (j < n && Character.isDigit(line.charAt(j))) j++;
+                String num = line.substring(i + 1, j);
+                try {
+                    int idx = Integer.parseInt(num) - 1;
+                    if (idx >= 0 && idx < macro.params.size()) {
+                        String pname = macro.params.get(idx);
+                        String repl = argMap.get(pname);
+                        if (repl != null) {
+                            out.append(repl);
+                            i = j - 1;
+                            continue;
+                        }
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+                out.append(c);
+                continue;
+            }
+
+            if (Character.isLetter(next) || next == '_') {
+                int j = i + 1;
+                while (j < n) {
+                    char ch = line.charAt(j);
+                    if (!(Character.isLetterOrDigit(ch) || ch == '_')) break;
+                    j++;
+                }
+                String ident = line.substring(i + 1, j);
+                String repl = argMap.get(ident);
+                if (repl != null) {
+                    out.append(repl);
+                    i = j - 1;
+                    continue;
+                }
+            }
+
+            // Unknown escape; keep the backslash as-is.
+            out.append(c);
+        }
+
+        return out.toString();
+    }
+
     private AssemblerInstruction assembleAt(String line, String sourceName, int lineNo) {
         this.currentSourceName = (sourceName == null || sourceName.isBlank()) ? "<input>" : sourceName;
         this.linenum = lineNo;
@@ -1427,7 +1646,8 @@ int wordsToBytes(int words) {
 
         // Best-effort column: first non-space in raw line.
         int firstNonWs = 0;
-        while (firstNonWs < line.length() && (line.charAt(firstNonWs) == ' ' || line.charAt(firstNonWs) == '\t')) firstNonWs++;
+        while (firstNonWs < line.length() && (line.charAt(firstNonWs) == ' ' || line.charAt(firstNonWs) == '\t'))
+            firstNonWs++;
         this.currentCol = Math.max(1, firstNonWs + 1);
 
         // Step 13: normalize .Lfoo locals into legal identifiers (same length)
@@ -1491,14 +1711,14 @@ int wordsToBytes(int words) {
                 // Macro invocation (macros take precedence over instructions)
                 String instRaw = pl.instruction.trim();
                 if (!instRaw.isEmpty()) {
-                  String opRaw = instRaw.split("\\s+", 2)[0];
-                  MacroDef macro = macros.get(opRaw.toLowerCase(Locale.ROOT));
-                  if (macro != null) {
-                    String argText = instRaw.substring(opRaw.length()).trim();
-                    List<String> args = argText.isEmpty() ? Collections.<String>emptyList() : splitTopLevelCommas(argText);
-                    expandAndAssembleMacro(macro, args, sourceName, lineNo);
-                    return null;
-                  }
+                    String opRaw = instRaw.split("\\s+", 2)[0];
+                    MacroDef macro = macros.get(opRaw.toLowerCase(Locale.ROOT));
+                    if (macro != null) {
+                        String argText = instRaw.substring(opRaw.length()).trim();
+                        List<String> args = argText.isEmpty() ? Collections.<String>emptyList() : splitTopLevelCommas(argText);
+                        expandAndAssembleMacro(macro, args, sourceName, lineNo);
+                        return null;
+                    }
                 }
 
                 String lowered = pl.instruction.toLowerCase(Locale.ROOT);
@@ -1510,8 +1730,9 @@ int wordsToBytes(int words) {
             return null;
         }
 
-        // Fallback: legacy behavior
-        return assembleLegacy(trimmed);
+        // ANTLR is required (no legacy fallback)
+        this.fatal("ANTLR parser required (R8AsmLexer/R8AsmParser not available or parse failed)");
+        return null;
     }
 
     private AssemblerInstruction matchAndEmit(String normalizedLower) {
@@ -1539,101 +1760,56 @@ int wordsToBytes(int words) {
         return null;
     }
 
-    private AssemblerInstruction assembleLegacy(String line) {
-        // remove comments (keep casing for macro args / strings)
-        String raw = line.replaceAll(";.*", "").trim();
 
-        if (raw.isEmpty()) {
-            return null;
-        }
-
-        // directive?
-        if (raw.charAt(0) == '.') {
-            String[] tokens = raw.split("\\s+");
-            this.parseDirective(tokens);
-            return null;
-        }
-
-        // find labels (store as lowercase)
-        Pattern pattern = Pattern.compile("([a-z_][a-z0-9_]*):", Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(raw);
-        while (matcher.find()) {
-            String label = matcher.group(1);
-            this.symbols.put(label.toLowerCase(Locale.ROOT), new Symbol(curSec.ip));
-        }
-        raw = matcher.replaceAll("").trim();
-
-        if (raw.isEmpty()) {
-            return null;
-        }
-
-        // macro invocation (legacy path)
-        String instRaw = raw.trim();
-        String opRaw = instRaw.split("\\s+", 2)[0];
-        MacroDef macro = macros.get(opRaw.toLowerCase(Locale.ROOT));
-        if (macro != null) {
-            String argText = instRaw.substring(opRaw.length()).trim();
-            List<String> args = argText.isEmpty()
-                    ? Collections.emptyList()
-                    : splitTopLevelCommas(argText);
-            expandAndAssembleMacro(macro, args, this.currentSourceName, this.linenum);
-            return null;
-        }
-
-        // make it lowercase for instruction matching
-        String lowered = instRaw.toLowerCase(Locale.ROOT);
-        String norm = normalizeForMatch(lowered);
-        return matchAndEmit(norm);
-    }
     // Apply fixups for unresolved symbols/expressions after instruction assembly
     // Apply fixups for unresolved symbols/expressions after instruction assembly
-private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue) {
-    long value = resolvedValue;
+    private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue) {
+        long value = resolvedValue;
 
-    if (fix.iprel) {
-        value = (value - fix.ofs) * fix.ipmul - fix.ipofs;
-    }
-
-    long max = mask64(fix.size);
-    long min = signedMin(fix.size);
-    if (fix.size < 64 && (value < min || value > max)) {
-        warning("Value " + value + " does not fit in " + fix.size + " bits", fix.line);
-    }
-    value &= max;
-
-    // Match buildInstruction semantics: swap full source width first
-    if ("little".equals(fix.endian)) {
-        value = swapEndian64(value, fix.size);
-    }
-
-    if (fix.srcofs > 0) {
-        value >>>= fix.srcofs;
-    }
-    value &= mask64(fix.dstlen);
-
-    for (int i = 0; i < fix.dstlen; i++) {
-        int dstBit0 = fix.dstofs + i;
-        int dstWord = fix.ofs + (dstBit0 / this.width);
-        int dstBit = this.width - 1 - (dstBit0 % this.width);
-
-        int outIndex = dstWord - sec.origin;
-        if (outIndex < 0) {
-            warning("Fixup for '" + fix.sym + "' writes before section origin (" + sec.name + ")", fix.line);
-            return;
+        if (fix.iprel) {
+            value = (value - fix.ofs) * fix.ipmul - fix.ipofs;
         }
-        while (outIndex >= sec.outwords.size()) sec.outwords.add(0);
 
-        int bitMask = (int) (1L << dstBit);
+        long max = mask64(fix.size);
+        long min = signedMin(fix.size);
+        if (fix.size < 64 && (value < min || value > max)) {
+            warning("Value " + value + " does not fit in " + fix.size + " bits", fix.line);
+        }
+        value &= max;
 
-        int cur = sec.outwords.get(outIndex) & ~bitMask;
+        // Match buildInstruction semantics: swap full source width first
+        if ("little".equals(fix.endian)) {
+            value = swapEndian64(value, fix.size);
+        }
 
-        long srcBit = (value >>> (fix.dstlen - 1 - i)) & 1L;
-        if (srcBit != 0) cur |= bitMask;
+        if (fix.srcofs > 0) {
+            value >>>= fix.srcofs;
+        }
+        value &= mask64(fix.dstlen);
 
-        cur &= mask32(this.width);
-        sec.outwords.set(outIndex, cur);
+        for (int i = 0; i < fix.dstlen; i++) {
+            int dstBit0 = fix.dstofs + i;
+            int dstWord = fix.ofs + (dstBit0 / this.width);
+            int dstBit = this.width - 1 - (dstBit0 % this.width);
+
+            int outIndex = dstWord - sec.origin;
+            if (outIndex < 0) {
+                warning("Fixup for '" + fix.sym + "' writes before section origin (" + sec.name + ")", fix.line);
+                return;
+            }
+            while (outIndex >= sec.outwords.size()) sec.outwords.add(0);
+
+            int bitMask = (int) (1L << dstBit);
+
+            int cur = sec.outwords.get(outIndex) & ~bitMask;
+
+            long srcBit = (value >>> (fix.dstlen - 1 - i)) & 1L;
+            if (srcBit != 0) cur |= bitMask;
+
+            cur &= mask32(this.width);
+            sec.outwords.set(outIndex, cur);
+        }
     }
-}
 
     void applyFixup(AssemblerFixup fix, long resolvedValue) {
         if (curSec == null) {
@@ -1893,7 +2069,8 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
 
         // recursion + depth guard
         if (includeStack.contains(resolvedKey)) return "Recursive include: " + resolvedKey;
-        if (includeStack.size() >= maxIncludeDepth) return "Include depth exceeded (" + maxIncludeDepth + "): " + resolvedKey;
+        if (includeStack.size() >= maxIncludeDepth)
+            return "Include depth exceeded (" + maxIncludeDepth + "): " + resolvedKey;
 
         includeStack.push(resolvedKey);
 
@@ -1940,6 +2117,76 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
             currentSourceName = prevName;
             if (!includeStack.isEmpty()) includeStack.pop();
         }
+    }
+
+    // ---------- External binary loading (.incbin) ----------
+
+    static String stripTrailingComma(String s) {
+        if (s == null) return null;
+        String t = s.trim();
+        while (t.endsWith(",")) t = t.substring(0, t.length() - 1).trim();
+        return t;
+    }
+
+    private byte[] loadExternalBinary(String ref, java.util.List<String> resourcePrefixes) {
+        if (ref == null || ref.isBlank()) return null;
+        ref = ref.trim();
+
+        // 1) Filesystem (relative to current source dir, include search paths, then CWD)
+        java.nio.file.Path file = null;
+        try {
+            java.nio.file.Path p = java.nio.file.Path.of(ref);
+
+            java.util.List<java.nio.file.Path> probes = new java.util.ArrayList<>();
+            if (!p.isAbsolute()) {
+                if (currentSourceDir != null) probes.add(currentSourceDir.resolve(p));
+
+                for (java.nio.file.Path inc : includeSearchPaths) {
+                    if (inc == null) continue;
+                    java.nio.file.Path base = inc;
+                    if (!base.isAbsolute() && currentSourceDir != null) base = currentSourceDir.resolve(base);
+                    probes.add(base.resolve(p));
+                }
+            }
+            probes.add(p);
+
+            for (java.nio.file.Path cand : probes) {
+                try {
+                    java.nio.file.Path c = cand.normalize();
+                    if (java.nio.file.Files.exists(c)) {
+                        file = c.toAbsolutePath().normalize();
+                        break;
+                    }
+                } catch (Exception ignore) {
+                    // try next
+                }
+            }
+        } catch (Exception ignore) {
+            // fall through
+        }
+
+        try {
+            if (file != null) {
+                return java.nio.file.Files.readAllBytes(file);
+            }
+
+            // 2) Classpath
+            ClassLoader cl = getClass().getClassLoader();
+            for (String prefix : resourcePrefixes) {
+                String res = (prefix == null ? "" : prefix) + ref;
+                String clPath = res.startsWith("/") ? res.substring(1) : res;
+                try (InputStream in = cl.getResourceAsStream(clPath)) {
+                    if (in == null) continue;
+                    return in.readAllBytes();
+                } catch (IOException ignore) {
+                    // try next
+                }
+            }
+        } catch (IOException ignore) {
+            return null;
+        }
+
+        return null;
     }
 
     // ---------- ANTLR one-line parsing (non-fatal; falls back to legacy) ----------
@@ -1990,15 +2237,15 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
 
                 Object ctx = parserCls.getMethod("oneLine").invoke(parser);
 
-            if (!el.errors.isEmpty()) {
-                int col = el.errors.get(0).col + 1;
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < el.errors.size(); i++) {
-                    if (i > 0) sb.append("; ");
-                    sb.append(el.errors.get(i).message);
+                if (!el.errors.isEmpty()) {
+                    int col = el.errors.get(0).col + 1;
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < el.errors.size(); i++) {
+                        if (i > 0) sb.append("; ");
+                        sb.append(el.errors.get(i).message);
+                    }
+                    return new ParsedLine(null, null, null, sb.toString(), col);
                 }
-                return new ParsedLine(null, null, null, sb.toString(), col);
-            }
 
                 String label = null;
                 Object labelDef = ctx.getClass().getMethod("labelDef").invoke(ctx);
@@ -2053,7 +2300,7 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
         }
     }
 
-    
+
     // Normalize directive arg text coming from ANTLR contexts:
     // - STRING tokens are returned with surrounding quotes; we strip and unescape.
     // - IDENT tokens are lower-cased for case-insensitive behavior.
@@ -2078,8 +2325,9 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (!esc) {
-                if (c == '\\') { esc = true; }
-                else out.append(c);
+                if (c == '\\') {
+                    esc = true;
+                } else out.append(c);
                 continue;
             }
             // esc == true
@@ -2102,127 +2350,129 @@ private void applyFixup(SectionState sec, AssemblerFixup fix, long resolvedValue
 // Step 13 helpers: local labels (.Lfoo) and numeric locals (1f / 1b)
 // ----------------------------------------------------------------------
 
-/**
- * Rewrites GAS-style dot-local labels (e.g. ".Lloop") to a grammar-legal form ("_Lloop").
- * Done as a same-length rewrite, and only outside of quoted strings.
- */
-private String rewriteDotLocals(String line) {
-    if (line == null || line.isEmpty()) return line;
+    /**
+     * Rewrites GAS-style dot-local labels (e.g. ".Lloop") to a grammar-legal form ("_Lloop").
+     * Done as a same-length rewrite, and only outside of quoted strings.
+     */
+    private String rewriteDotLocals(String line) {
+        if (line == null || line.isEmpty()) return line;
 
-    StringBuilder out = new StringBuilder(line.length());
-    boolean inQuote = false;
-    boolean escaped = false;
-    int segStart = 0;
+        StringBuilder out = new StringBuilder(line.length());
+        boolean inQuote = false;
+        boolean escaped = false;
+        int segStart = 0;
 
-    for (int i = 0; i < line.length(); i++) {
-        char c = line.charAt(i);
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
 
-        if (escaped) {
-            escaped = false;
-            continue;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"') {
+                if (!inQuote) {
+                    // outside segment [segStart, i)
+                    String seg = line.substring(segStart, i);
+                    seg = DOT_LOCAL_PATTERN.matcher(seg).replaceAll("_L$1");
+                    seg = NUM_REF_PATTERN.matcher(seg).replaceAll("__L$1$2");
+                    out.append(seg);
+                    // start quote segment at i
+                    segStart = i;
+                    inQuote = true;
+                } else {
+                    // quoted segment [segStart, i+1] untouched
+                    out.append(line, segStart, i + 1);
+                    segStart = i + 1;
+                    inQuote = false;
+                }
+            }
         }
-        if (c == '\\') {
-            escaped = true;
-            continue;
-        }
 
-        if (c == '"') {
-            if (!inQuote) {
-                // outside segment [segStart, i)
-                String seg = line.substring(segStart, i);
+        if (segStart < line.length()) {
+            String seg = line.substring(segStart);
+            if (inQuote) {
+                out.append(seg);
+            } else {
                 seg = DOT_LOCAL_PATTERN.matcher(seg).replaceAll("_L$1");
                 seg = NUM_REF_PATTERN.matcher(seg).replaceAll("__L$1$2");
                 out.append(seg);
-                // start quote segment at i
-                segStart = i;
-                inQuote = true;
-            } else {
-                // quoted segment [segStart, i+1] untouched
-                out.append(line, segStart, i + 1);
-                segStart = i + 1;
-                inQuote = false;
             }
         }
+
+        return out.toString();
     }
 
-    if (segStart < line.length()) {
-        String seg = line.substring(segStart);
-        if (inQuote) {
-            out.append(seg);
-        } else {
-            seg = DOT_LOCAL_PATTERN.matcher(seg).replaceAll("_L$1");
-            seg = NUM_REF_PATTERN.matcher(seg).replaceAll("__L$1$2");
-            out.append(seg);
+    /**
+     * Record a numeric local definition like "1:" at the current IP.
+     */
+    private void defineNumericLabel(int n, int atIp) {
+        numericLabels.computeIfAbsent(n, k -> new ArrayList<>()).add(atIp);
+    }
+
+    private Integer resolveNumericRef(int n, char dir, int dot) {
+        List<Integer> addrs = numericLabels.get(n);
+        if (addrs == null || addrs.isEmpty()) return null;
+
+        if (dir == 'b') {
+            for (int i = addrs.size() - 1; i >= 0; i--) {
+                int a = addrs.get(i);
+                if (a <= dot) return a;
+            }
+            return null;
+        } else { // 'f'
+            for (int a : addrs) {
+                if (a > dot) return a;
+            }
+            return null;
         }
     }
 
-    return out.toString();
-}
+    /**
+     * Evaluate an expression while allowing numeric locals (1f/1b). Returns null if unresolved.
+     * This is used both during assembly (to decide whether to create a fixup) and during finish()
+     * (when forward refs should be resolvable).
+     */
+    private Long evalExprAllowLocals(String expr, int dot) {
+        if (expr == null) return null;
+        String e = expr.trim();
+        if (e.isEmpty()) return 0L;
 
-/** Record a numeric local definition like "1:" at the current IP. */
-private void defineNumericLabel(int n, int atIp) {
-    numericLabels.computeIfAbsent(n, k -> new ArrayList<>()).add(atIp);
-}
-
-private Integer resolveNumericRef(int n, char dir, int dot) {
-    List<Integer> addrs = numericLabels.get(n);
-    if (addrs == null || addrs.isEmpty()) return null;
-
-    if (dir == 'b') {
-        for (int i = addrs.size() - 1; i >= 0; i--) {
-            int a = addrs.get(i);
-            if (a <= dot) return a;
+        // Normalize any ".Lfoo" that survived preprocessing (rare, but safe).
+        e = DOT_LOCAL_PATTERN.matcher(e).replaceAll("_L$1");    // Replace numeric locals in-place with absolute addresses.
+        // We rewrite 1f/1b to __L1f/__L1b before parsing so ANTLR doesn't split tokens.
+        Matcher m2 = NUM_REF_REWRITTEN_PATTERN.matcher(e);
+        StringBuffer sb2 = new StringBuffer();
+        while (m2.find()) {
+            int n = Integer.parseInt(m2.group(1));
+            char dir = Character.toLowerCase(m2.group(2).charAt(0));
+            Integer target = resolveNumericRef(n, dir, dot);
+            if (target == null) return null; // defer (forward) or error later
+            m2.appendReplacement(sb2, Matcher.quoteReplacement(Integer.toString(target)));
         }
-        return null;
-    } else { // 'f'
-        for (int a : addrs) {
-            if (a > dot) return a;
+        m2.appendTail(sb2);
+        e = sb2.toString();
+
+        Matcher m = NUM_REF_PATTERN.matcher(e);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            int n = Integer.parseInt(m.group(1));
+            char dir = Character.toLowerCase(m.group(2).charAt(0));
+            Integer target = resolveNumericRef(n, dir, dot);
+            if (target == null) return null; // defer (forward) or error later
+            m.appendReplacement(sb, Matcher.quoteReplacement(Integer.toString(target)));
         }
-        return null;
+        m.appendTail(sb);
+        e = sb.toString();
+
+        return ExpressionEvaluator.eval(e, symbols, dot);
     }
-}
 
-/**
- * Evaluate an expression while allowing numeric locals (1f/1b). Returns null if unresolved.
- * This is used both during assembly (to decide whether to create a fixup) and during finish()
- * (when forward refs should be resolvable).
- */
-private Long evalExprAllowLocals(String expr, int dot) {
-    if (expr == null) return null;
-    String e = expr.trim();
-    if (e.isEmpty()) return 0L;
-
-    // Normalize any ".Lfoo" that survived preprocessing (rare, but safe).
-    e = DOT_LOCAL_PATTERN.matcher(e).replaceAll("_L$1");    // Replace numeric locals in-place with absolute addresses.
-    // We rewrite 1f/1b to __L1f/__L1b before parsing so ANTLR doesn't split tokens.
-    Matcher m2 = NUM_REF_REWRITTEN_PATTERN.matcher(e);
-    StringBuffer sb2 = new StringBuffer();
-    while (m2.find()) {
-        int n = Integer.parseInt(m2.group(1));
-        char dir = Character.toLowerCase(m2.group(2).charAt(0));
-        Integer target = resolveNumericRef(n, dir, dot);
-        if (target == null) return null; // defer (forward) or error later
-        m2.appendReplacement(sb2, Matcher.quoteReplacement(Integer.toString(target)));
-    }
-    m2.appendTail(sb2);
-    e = sb2.toString();
-
-    Matcher m = NUM_REF_PATTERN.matcher(e);
-    StringBuffer sb = new StringBuffer();
-    while (m.find()) {
-        int n = Integer.parseInt(m.group(1));
-        char dir = Character.toLowerCase(m.group(2).charAt(0));
-        Integer target = resolveNumericRef(n, dir, dot);
-        if (target == null) return null; // defer (forward) or error later
-        m.appendReplacement(sb, Matcher.quoteReplacement(Integer.toString(target)));
-    }
-    m.appendTail(sb);
-    e = sb.toString();
-
-    return ExpressionEvaluator.eval(e, symbols, dot);
-}
-
-static final class CollectingErrorListener extends BaseErrorListener {
+    static final class CollectingErrorListener extends BaseErrorListener {
         static final class SyntaxIssue {
             final int line;
             final int col; // 0-based

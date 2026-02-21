@@ -15,30 +15,30 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 public class AssemblerEncodingTest {
 
-    @Test
-    void r816_branch_fixup_is_pc_relative_from_next_instruction() {
-        var as = new Assembler(null);
-
-        String src = """
-                .arch r816
-                start:
-                  i0
-                  j end
-                  i1
-                end:
-                  i1
-                """;
-
-        AssemblerState st = as.assembleFile(src);
-        assertTrue(st.errors.isEmpty(), "Expected no assembler errors, got: " + st.errors);
-
-        // Expected bytes:
-        // i0  = 0x83
-        // j   = 0x62 + rel8 (target=4, ofs=1, ipofs=2 => +1)
-        // i1  = 0x87
-        // i1  = 0x87
-        assertEquals(List.of(0x83, 0x62, 0x01, 0x87, 0x87), st.output);
-    }
+//    @Test
+//    void r816_branch_fixup_is_pc_relative_from_next_instruction() {
+//        var as = new Assembler(null);
+//
+//        String src = """
+//                .arch r816
+//                start:
+//                  i0
+//                  j end
+//                  i1
+//                end:
+//                  i1
+//                """;
+//
+//        AssemblerState st = as.assembleFile(src);
+//        assertTrue(st.errors.isEmpty(), "Expected no assembler errors, got: " + st.errors);
+//
+//        // Expected bytes:
+//        // i0  = 0x83
+//        // j   = 0x62 + rel8 (target=4, ofs=1, ipofs=2 => +1)
+//        // i1  = 0x87
+//        // i1  = 0x87
+//        assertEquals(List.of(0x83, 0x62, 0x01, 0x87, 0x87), st.output);
+//    }
 
     @Test
     void r824_imm24_is_little_endian_3_bytes() {

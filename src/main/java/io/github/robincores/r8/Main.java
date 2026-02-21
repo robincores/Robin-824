@@ -1,44 +1,101 @@
 package io.github.robincores.r8;
 
+import io.github.robincores.r8.dev.AsmCompiler;
 import io.github.robincores.r8.device.DisplayConfig;
+import io.github.robincores.r8.system.FxSystem;
 import io.github.robincores.r8.system.R816System;
-import io.github.robincores.r8.system.R8System;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * Application entry point.
- * <p>
- * Launches the selected system configuration, loads a demo binary,
- * and runs the CPU on a background thread while the JavaFX canvas
- * displays the VPU output.
- * </p>
- */
 public class Main extends Application {
 
     private ExecutorService executor;
-    private R8System system;
+    private FxSystem system;
 
     @Override
     public void start(Stage stage) throws IOException {
-        // ---- Select system ----
-        Canvas canvas = new Canvas();  // VPU will set the size
-        DisplayConfig config = R816System.displayConfig();
+        // ---- Parse args FIRST (do not create the system yet) ----
+        List<String> raw = getParameters().getRaw();
 
+        String prog = null;
+        int loadAddr = 0x0000;
+        String defaultArch = "r816";
+
+        boolean endOfOpts = false;
+        for (int i = 0; i < raw.size(); i++) {
+            String a = raw.get(i);
+
+            if (!endOfOpts && "--".equals(a)) {
+                endOfOpts = true;
+                continue;
+            }
+
+            if (!endOfOpts && "--addr".equals(a) && i + 1 < raw.size()) {
+                loadAddr = parseIntAutoBase(raw.get(++i));
+                continue;
+            }
+
+            if (!endOfOpts && "--arch".equals(a) && i + 1 < raw.size()) {
+                defaultArch = raw.get(++i).trim().toLowerCase();
+                continue;
+            }
+
+            if (!endOfOpts && a.startsWith("-")) {
+                // Unknown option: ignore for now (keeps CLI forwards-compatible)
+                continue;
+            }
+
+            if (prog == null) prog = a;
+        }
+
+        // ---- Prepare program bytes (and assemble) BEFORE system creation ----
+        byte[] image = null;
+        String builtIn = "basic.bin";
+
+        if (prog != null) {
+            Path p = Path.of(prog);
+            if (!Files.exists(p)) {
+                System.err.println("Program not found: " + p.toAbsolutePath());
+                Platform.exit();
+                return;
+            }
+
+            if (prog.toLowerCase().endsWith(".asm")) {
+                try {
+                    image = AsmCompiler.assembleToBytes(p, defaultArch);
+                } catch (RuntimeException ex) {
+                    System.err.println(ex.getMessage());
+                    Platform.exit();
+                    return;
+                }
+            } else {
+                image = Files.readAllBytes(p);
+            }
+        }
+
+        // ---- Select system (default is always R816 for now) ----
+        Canvas canvas = new Canvas(); // VPU will set size
+        canvas.setFocusTraversable(true);
+
+        DisplayConfig config = R816System.displayConfig();
         system = new R816System(canvas);
 
-        // Load built-in Mode X gradient demo (avoids stale system.bin files).
-        //system.loadProgram("modex_gradient.bin", 0x0000);
-        //system.loadProgram("modex_stripes.bin", 0x0000);
-        //system.loadProgram("modex_ramp.bin", 0x0000);
-        system.loadProgram("modex_quadrant_blue.bin", 0x0000);
+        if (prog == null) {
+            system.loadProgram(builtIn, 0x0000);
+        } else {
+            system.loadProgramBytes(image, loadAddr);
+        }
 
         // ---- Build scene ----
         StackPane root = new StackPane(canvas);
@@ -47,13 +104,12 @@ public class Main extends Application {
         stage.setTitle("R816 System");
         stage.setScene(scene);
         stage.setResizable(false);
-        stage.show();
 
-        // ---- Shutdown hook ----
-        stage.setOnCloseRequest(e -> {
-            system.stop();
-            executor.shutdownNow();
-        });
+        // Attach UI bindings (keyboard, etc.) BEFORE CPU starts
+        system.attach(scene);
+
+        // Ensure focus so KEY_TYPED/KEY_PRESSED events actually fire
+        stage.setOnShown(e -> canvas.requestFocus());
 
         // ---- Run CPU on background thread ----
         executor = Executors.newSingleThreadExecutor(r -> {
@@ -61,6 +117,13 @@ public class Main extends Application {
             t.setDaemon(true);
             return t;
         });
+
+        stage.setOnCloseRequest(e -> {
+            if (system != null) system.stop();
+            if (executor != null) executor.shutdownNow();
+        });
+
+        stage.show();
         executor.submit(system::run);
     }
 
@@ -70,7 +133,14 @@ public class Main extends Application {
         if (executor != null) executor.shutdownNow();
     }
 
+    private static int parseIntAutoBase(String s) {
+        String t = s.trim().toLowerCase();
+        if (t.startsWith("0x")) return Integer.parseUnsignedInt(t.substring(2), 16);
+        if (t.startsWith("$"))  return Integer.parseUnsignedInt(t.substring(1), 16);
+        return Integer.parseInt(t, 10);
+    }
+
     public static void main(String[] args) {
-        launch(args);
+        Application.launch(Main.class, args);
     }
 }

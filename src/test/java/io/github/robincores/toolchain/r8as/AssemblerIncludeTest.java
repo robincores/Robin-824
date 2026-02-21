@@ -18,13 +18,13 @@ public class AssemblerIncludeTest {
 
         Files.writeString(defs, """
                 .equ foo 0x10+1
-                .data foo
+                .byte foo
                 """);
 
         Files.writeString(main, """
                 .arch r816
                 .include "defs.asm"
-                .data foo+1
+                .byte foo+1
                 """);
 
         var as = new Assembler(null);
@@ -42,13 +42,13 @@ public class AssemblerIncludeTest {
         Path main = dir.resolve("main.asm");
 
         Files.writeString(defs, """
-                .data 7
+                .byte 7
                 """);
 
         Files.writeString(main, """
                 .arch r816
                 .include "defs.asm"
-                .data 8
+                .byte 8
                 """);
 
         var as = new Assembler(null).addIncludePath(inc);
@@ -71,13 +71,13 @@ public class AssemblerIncludeTest {
 
         Files.writeString(defs1, """
                 .include "defs2.asm"
-                .data foo
+                .byte foo
                 """);
 
         Files.writeString(main, """
                 .arch r816
                 .include "defs1.asm"
-                .data foo+1
+                .byte foo+1
                 """);
 
         var as = new Assembler(null);
@@ -95,7 +95,7 @@ public class AssemblerIncludeTest {
         Files.writeString(main, """
                 .arch r816
                 .include "nope.asm"
-                .data 1
+                .byte 1
                 """);
 
         var as = new Assembler(null);
@@ -115,12 +115,12 @@ public class AssemblerIncludeTest {
         Files.writeString(a, """
                 .arch r816
                 .include "b.asm"
-                .data 1
+                .byte 1
                 """);
 
         Files.writeString(b, """
                 .include "a.asm"
-                .data 2
+                .byte 2
                 """);
 
         var as = new Assembler(null);

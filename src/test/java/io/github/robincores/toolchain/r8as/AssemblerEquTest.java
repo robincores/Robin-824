@@ -18,7 +18,7 @@ public class AssemblerEquTest {
         String src = """
                 .arch r816
                 .equ foo, 0x10+1
-                .data foo, foo+1
+                .byte foo, foo+1
                 i foo+2
                 """;
 
@@ -39,7 +39,7 @@ public class AssemblerEquTest {
                 .arch r816
                 .equ x, 1
                 .equ x, 2
-                .data x
+                .byte x
                 """;
 
         AssemblerState st = as.assembleFile(src);
@@ -56,7 +56,7 @@ public class AssemblerEquTest {
                 .arch r816
                 .equ x, 1
                 .set x, 2
-                .data x
+                .byte x
                 """;
 
         AssemblerState st = as.assembleFile(src);

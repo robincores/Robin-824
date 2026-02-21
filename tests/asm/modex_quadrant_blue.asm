@@ -1,17 +1,21 @@
-; modex_quadrant_blue.asm
-; ModeX (320x200, 8bpp, 4 planes). Fill top-left quadrant with BLUE.
-; Region: x=[0..159], y=[0..99]
-; RGB332 blue = 0x03
+; modex_quadrant_blue_bra.asm
+; MODE 2 (320x200, 8bpp Mode-X). Fill top-left quadrant (160x100) BLUE.
+; Uses BRA (rel8) instead of J.
 
 .arch r816
 
 start:
-    ; --- MMIO window on (so 0xC000.. is VPU regs) ---
+    ; --- MMIO window on (0xC000.. = VPU regs) ---
     i  0xBFF0
-    u  0x04         ; VIDWIN: WIN_MMIO=1
+    u  0x04                 ; VIDWIN: WIN_MMIO=1
     sb
 
-    ; --- MODE=2 (320x200 8bpp ModeX) ---
+    ; --- disable text overlay (otherwise it covers graphics) ---
+    i  0xC007                ; TX_CTRL
+    u  0x00                  ; TX_EN=0
+    sb
+
+    ; --- MODE=2 ---
     i  0xC002
     u  0x02
     sb
@@ -34,7 +38,7 @@ start:
     stl @2
 
 plane_loop:
-    ; map VRAM plane into 0xC000 window (WIN_MMIO=0)
+    ; map VRAM plane into 0xC000 window (WIN_MMIO=0, VBANK=plane)
     i   0xBFF0
     ldl @2
     sb
@@ -56,13 +60,13 @@ y_loop:
     ; rowBase = 0xC000 + y*80  (80 = 64 + 16)
     ldl @3          ; y
     dup
-    sll 4           ; y, (16y)
-    swap            ; (16y), y
-    sll 4           ; (16y), (16y)
-    sll 2           ; (16y), (64y)
+    sll 4           ; 16y
+    swap
+    sll 4           ; 16y
+    sll 2           ; 64y
     add             ; 80y
     i   0xC000
-    add             ; 0xC000 + 80y
+    add
     stl @4          ; rowBase
 
     ; ptr = rowBase
@@ -79,9 +83,9 @@ x_loop:
     i0
     beq end_row
 
-    ; [ptr] = BLUE (0x03)
+    ; [ptr] = BLUE (use 0x01 for blue in default VGA-ish palette)
     ldl @5
-    u   0x03
+    u   0x01
     sb
 
     ; ptr++
@@ -93,7 +97,7 @@ x_loop:
     dec
     stl @1
 
-    j x_loop
+    bra x_loop
 
 end_row:
     ; y++
@@ -106,7 +110,7 @@ end_row:
     dec
     stl @6
 
-    j y_loop
+    bra y_loop
 
 next_plane:
     ; plane++
@@ -120,5 +124,4 @@ next_plane:
     blt plane_loop
 
 done:
-    j done
-
+    bra done

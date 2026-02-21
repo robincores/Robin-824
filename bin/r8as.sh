@@ -4,7 +4,7 @@
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 
 # Path to the JAR file based on the script's location
-JAR_FILE="$SCRIPT_DIR/../target/skyline-jar-with-dependencies.jar"
+JAR_FILE="$SCRIPT_DIR/../target/skyline-mac-aarch64.jar"
 
 # Check if the JAR file exists
 if [ ! -f "$JAR_FILE" ]; then

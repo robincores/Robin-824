@@ -19,7 +19,7 @@ public class AssemblerFixupExprTest {
                 .arch r816
                 i target+2
                 target:
-                .data 0xAA
+                .byte 0xAA
                 """;
 
         AssemblerState st = as.assembleFile(src);
@@ -35,9 +35,9 @@ public class AssemblerFixupExprTest {
 
         String src = """
                 .arch r816
-                .data target+1
+                .byte target+1
                 target:
-                .data 0xAA
+                .byte 0xAA
                 """;
 
         AssemblerState st = as.assembleFile(src);
