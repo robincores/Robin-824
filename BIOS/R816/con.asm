@@ -1,230 +1,141 @@
-; ============================================================
-; con.asm - text console for VPU MODE=4 (80x25, 2 bytes/cell)
-; uses w8=x, w9=y
-; ============================================================
+; BIOS/R816/con.asm
+; Console routines (expects ports.inc + macros.inc already included)
 
-con_sync_cursor:
-    stl w14
-    i VPU_CUR_X
-    ldl w8
-    sb
-    i VPU_CUR_Y
-    ldl w9
-    sb
-    ldl w14
-    jr
+bios_term_init:
+  stl w14
 
-con_cls:
-    stl w14
+  WB SYS_VIDWIN, VIDWIN_MMIO_BIT
+  WB VPU_OVL_MODE, OVL_TEXT
+  WB VPU_CTRL, CTRL_DEFAULT
+  WB VPU_MODE, GFX_MODE
+  WB VPU_TX_CTRL, TXCTRL_DEFAULT
 
-    i0
-    stl w8
-    i0
-    stl w9
-    jal con_sync_cursor
+  WB VPU_TX_CUR_START, 0x00
+  WB VPU_TX_CUR_END,   0x0F
 
-    i VPU_TEXT_BASE
-    stl w10
+  WB VPU_TX_ORG_L, 0x00
+  WB VPU_TX_ORG_H, 0x00
+  WB VPU_TX_FINE_Y, 0x00
+  WB VPU_TX_FINE_X, 0x00
 
-    i (VPU_TEXT_COLS * VPU_TEXT_ROWS)   ; 2000 cells
-    stl w11
+  WB VPU_TX_ATTR, 0x0F
+  WB VPU_TX_CMD, TXCMD_HOME_CLS
 
-.con_cls_loop:
-    ldl w11
-    i0
-    beq .con_cls_done
+  ldl w14
+  jr
 
-    ; char = ' '
-    ldl w10
-    b $20
-    sb
-    ldl w10
-    inc
-    stl w10
+bios_putc:
+  stl w14
+  i VPU_TX_PORT
+  ldl w0
+  sb
+  ldl w14
+  jr
 
-    ; attr = 0x0F
-    ldl w10
-    b $0F
-    sb
-    ldl w10
-    inc
-    stl w10
+bios_puts_z:
+  stl w14
+  ldl w0
+  stl w10
 
-    ldl w11
-    dec
-    stl w11
+.Lcon_pz_loop:
+  ldl w10
+  lu
+  stl w1
 
-    j .con_cls_loop
+  ldl w1
+  i0
+  beq .Lcon_pz_done
 
-.con_cls_done:
-    ldl w14
-    jr
+  ldl w1
+  stl w0
+  CALL bios_putc
 
-con_puts_z:
-    stl w14
-    ldl w0
-    stl w10
+  ldl w10
+  inc
+  stl w10
+  bra .Lcon_pz_loop
 
-.con_puts_loop:
-    ldl w10
-    lu
-    stl w1
+.Lcon_pz_done:
+  ldl w14
+  jr
 
-    ldl w1
-    i0
-    beq .con_puts_done
+bios_crlf:
+  stl w14
+  u 13
+  stl w0
+  CALL bios_putc
+  u 10
+  stl w0
+  CALL bios_putc
+  ldl w14
+  jr
 
-    ldl w1
-    stl w0
-    jal con_putc
+bios_cls:
+  stl w14
+  WB VPU_TX_CMD, TXCMD_HOME_CLS
+  ldl w14
+  jr
 
-    ldl w10
-    inc
-    stl w10
-    j .con_puts_loop
+; ------------------------------------------------------------
+; bios_print_u16(w0 = unsigned 16-bit) prints decimal
+; uses stack to reverse digits
+; ------------------------------------------------------------
+bios_print_u16:
+  stl w14
 
-.con_puts_done:
-    ldl w14
-    jr
+  ldl w0
+  i0
+  beq .Lcon_pu_zero
 
-con_putc:
-    stl w14
+  ldl w0
+  stl w2        ; n
+  i0
+  stl w3        ; count
 
-    ; CR
-    ldl w0
-    b $0D
-    beq .cr
+.Lcon_pu_push:
+  ldl w2
+  u 10
+  mod
+  stl w1
 
-    ; LF
-    ldl w0
-    b $0A
-    beq .lf
+  ldl w2
+  u 10
+  div
+  stl w2
 
-    ; BS
-    ldl w0
-    b $08
-    beq .bs
+  ldl w1
+  u 48
+  add
+  push
 
-    ; normal printable
-    jal con_cell_addr
+  ldl w3
+  inc
+  stl w3
 
-    ; write char
-    ldl w2
-    ldl w0
-    sb
+  ldl w2
+  i0
+  beq .Lcon_pu_pop
+  bra .Lcon_pu_push
 
-    ; write attr
-    ldl w3
-    b $0F
-    sb
+.Lcon_pu_pop:
+  ldl w3
+  i0
+  beq .Lcon_pu_done
 
-    ; x++
-    ldl w8
-    inc
-    stl w8
+  pop
+  stl w0
+  CALL bios_putc
 
-    ; if x >= 80 -> newline
-    ldl w8
-    i VPU_TEXT_COLS
-    bge .lf
+  ldl w3
+  dec
+  stl w3
+  bra .Lcon_pu_pop
 
-    jal con_sync_cursor
-    ldl w14
-    jr
+.Lcon_pu_zero:
+  u 48
+  stl w0
+  CALL bios_putc
 
-.cr:
-    i0
-    stl w8
-    jal con_sync_cursor
-    ldl w14
-    jr
-
-.lf:
-    i0
-    stl w8
-    ldl w9
-    inc
-    stl w9
-
-    ; wrap for v0.1 (scroll later)
-    ldl w9
-    i VPU_TEXT_ROWS
-    bge .wrap
-
-    jal con_sync_cursor
-    ldl w14
-    jr
-
-.wrap:
-    i0
-    stl w9
-    jal con_sync_cursor
-    ldl w14
-    jr
-
-.bs:
-    ldl w8
-    i0
-    beq .bs_done
-
-    ldl w8
-    dec
-    stl w8
-    jal con_sync_cursor
-
-    jal con_cell_addr
-    ldl w2
-    b $20
-    sb
-    ldl w3
-    b $0F
-    sb
-
-.bs_done:
-    ldl w14
-    jr
-
-; returns w2=charAddr, w3=attrAddr
-con_cell_addr:
-    stl w14
-
-    ; y*160 = y*128 + y*32
-    ldl w9
-    sll 4
-    sll 3
-    stl w12        ; y*128
-
-    ldl w9
-    sll 4
-    sll 1
-    stl w13        ; y*32
-
-    ldl w12
-    ldl w13
-    add
-    stl w12        ; y*160
-
-    ; x*2
-    ldl w8
-    sll 1
-    stl w13
-
-    ; offset = y*160 + x*2
-    ldl w12
-    ldl w13
-    add
-    stl w12
-
-    ; charAddr = base + offset
-    i VPU_TEXT_BASE
-    ldl w12
-    add
-    stl w2
-
-    ; attrAddr = charAddr + 1
-    ldl w2
-    inc
-    stl w3
-
-    ldl w14
-    jr
+.Lcon_pu_done:
+  ldl w14
+  jr

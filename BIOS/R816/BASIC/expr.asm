@@ -1,236 +1,235 @@
-; ============================================================
-; expr.asm - integers + variables, + and - only (v0.1)
-; returns value in w0, uses w10 as input pointer
-; ============================================================
+; BIOS/R816/BASIC/expr.asm
+; Integer expression evaluator (v0.4)
+; - signed 16-bit integers
+; - grammar: expr := term (('+'|'-') term)*
+;           term := factor (('*'|'/') factor)*
+;         factor := number | ident | '(' expr ')' | '-' factor
+;
+; Conventions:
+;   w10 = parse pointer (updated)
+;   expr_eval() -> w0=value, w1=1 if consumed tokens else 0
 
-parse_expr:
-    stl w14
+; ------------------------------------------------------------
+; expr_eval()
+; out: w0=value, w1=success(1/0)
+; ------------------------------------------------------------
+expr_eval:
+  stl w14
 
-    jal parse_term
-    ldl w0
-    stl w12      ; lhs
+  ldl w10
+  stl w9          ; start
 
-.pe_loop:
-    jal skip_spaces
-    ldl w10
-    lu
-    stl w1
+  CALL expr_parse_expr
 
-    ; '+' ?
-    ldl w1
-    b $2B
-    beq .do_plus
+  ldl w10
+  ldl w9
+  beq .Lex_fail
 
-    ; '-' ?
-    ldl w1
-    b $2D
-    beq .do_minus
+  u 1
+  stl w1
+  ldl w14
+  jr
 
-    j .pe_done
+.Lex_fail:
+  i0
+  stl w1
+  ldl w14
+  jr
 
-.do_plus:
-    ldl w10
-    inc
-    stl w10
+; ------------------------------------------------------------
+; expr_parse_expr() -> w0
+; ------------------------------------------------------------
+expr_parse_expr:
+  stl w14
 
-    jal parse_term
+  CALL expr_parse_term
+  ldl w0
+  stl w2          ; left
 
-    ldl w12
-    ldl w0
-    add
-    stl w12
-    j .pe_loop
+.Lex_e_loop:
+  CALL tok_skip_spaces
+  CALL tok_peek
+  stl w3          ; op
 
-.do_minus:
-    ldl w10
-    inc
-    stl w10
+  ; '+'?
+  ldl w3
+  u 43
+  beq .Lex_e_plus
 
-    jal parse_term
+  ; '-'?
+  ldl w3
+  u 45
+  beq .Lex_e_minus
 
-    ldl w12
-    ldl w0
-    sub
-    stl w12
-    j .pe_loop
+  ; done
+  ldl w2
+  stl w0
+  ldl w14
+  jr
 
-.pe_done:
-    ldl w12
-    stl w0
-    ldl w14
-    jr
+.Lex_e_plus:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_term
 
-parse_term:
-    stl w14
-    jal skip_spaces
+  ldl w2
+  ldl w0
+  add
+  stl w2
+  bra .Lex_e_loop
 
-    ldl w10
-    lu
-    stl w1
+.Lex_e_minus:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_term
 
-    ; digit?
-    ldl w1
-    b $30
-    blt .maybe_var
-    ldl w1
-    b $3A
-    bge .maybe_var
+  ldl w2
+  ldl w0
+  sub
+  stl w2
+  bra .Lex_e_loop
 
-    jal parse_decimal
-    ldl w14
-    jr
+; ------------------------------------------------------------
+; expr_parse_term() -> w0
+; ------------------------------------------------------------
+expr_parse_term:
+  stl w14
 
-.maybe_var:
-    ; A..Z
-    ldl w1
-    b $41
-    blt .zero
-    ldl w1
-    b $5B
-    bge .zero
+  CALL expr_parse_factor
+  ldl w0
+  stl w2          ; left
 
-    ; idx = ch - 'A'
-    ldl w1
-    b $41
-    sub
-    stl w2
+.Lex_t_loop:
+  CALL tok_skip_spaces
+  CALL tok_peek
+  stl w3          ; op
 
-    ; advance
-    ldl w10
-    inc
-    stl w10
+  ; '*'
+  ldl w3
+  u 42
+  beq .Lex_t_mul
 
-    ; addr = VAR_BASE + idx*2
-    ldl w2
-    sll 1
-    stl w2
+  ; '/'
+  ldl w3
+  u 47
+  beq .Lex_t_div
 
-    i VAR_BASE
-    ldl w2
-    add
-    ld
-    stl w0
+  ldl w2
+  stl w0
+  ldl w14
+  jr
 
-    ldl w14
-    jr
+.Lex_t_mul:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_factor
 
-.zero:
-    i0
-    stl w0
-    ldl w14
-    jr
+  ldl w2
+  ldl w0
+  mul
+  stl w2
+  bra .Lex_t_loop
 
-parse_decimal:
-    stl w14
-    i0
-    stl w0
+.Lex_t_div:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_factor
 
-.pd_loop:
-    ldl w10
-    lu
-    stl w1
+  ldl w2
+  ldl w0
+  div
+  stl w2
+  bra .Lex_t_loop
 
-    ldl w1
-    b $30
-    blt .pd_done
-    ldl w1
-    b $3A
-    bge .pd_done
+; ------------------------------------------------------------
+; expr_parse_factor() -> w0
+; ------------------------------------------------------------
+expr_parse_factor:
+  stl w14
 
-    ; digit = ch - '0'
-    ldl w1
-    b $30
-    sub
-    stl w2
+  CALL tok_skip_spaces
+  CALL tok_peek
+  stl w3          ; ch
 
-    ; value = value*10 + digit
-    ldl w0
-    b $0A
-    mul
-    stl w0
+  ; '(' ?
+  ldl w3
+  u 40
+  beq .Lfac_paren
 
-    ldl w0
-    ldl w2
-    add
-    stl w0
+  ; unary '-' ?
+  ldl w3
+  u 45
+  beq .Lfac_neg
 
-    ldl w10
-    inc
-    stl w10
-    j .pd_loop
+  ; digit? '0'..'9'
+  ldl w3
+  u 48
+  blt .Lfac_ident
+  ldl w3
+  u 58
+  bge .Lfac_ident
 
-.pd_done:
-    ldl w14
-    jr
+  CALL tok_read_u16
+  ; tok_read_u16 sets w0=value, w1=consumed
+  ldl w14
+  jr
 
-; w0=value, prints unsigned decimal
-print_int16:
-    stl w14
+.Lfac_ident:
+  CALL tok_read_ident
+  ldl w1
+  i0
+  beq .Lfac_fail
 
-    ldl w0
-    i0
-    beq .pi_zero
+  ; vars_get(namePtr=w0, len=w1)
+  CALL vars_get
+  ldl w14
+  jr
 
-    i (LINE_BUF + 128)
-    stl w10      ; scratch ptr
-    i0
-    stl w11      ; count
+.Lfac_paren:
+  ; consume '('
+  ldl w10
+  inc
+  stl w10
 
-.pi_loop:
-    ldl w0
-    b $0A
-    rem
-    stl w2
+  CALL expr_parse_expr
 
-    ldl w0
-    b $0A
-    div
-    stl w0
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 41
+  beq .Lfac_cons_rparen
 
-    ldl w2
-    b $30
-    add
-    stl w2
+  ; missing ')': still return value
+  ldl w14
+  jr
 
-    ldl w10
-    ldl w2
-    sb
+.Lfac_cons_rparen:
+  ldl w10
+  inc
+  stl w10
+  ldl w14
+  jr
 
-    ldl w10
-    inc
-    stl w10
-    ldl w11
-    inc
-    stl w11
+.Lfac_neg:
+  ; consume '-'
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_factor
 
-    ldl w0
-    i0
-    bne .pi_loop
+  ldl w0
+  neg
+  stl w0
 
-.pi_rev:
-    ldl w11
-    i0
-    beq .pi_done
+  ldl w14
+  jr
 
-    ldl w10
-    dec
-    stl w10
-    ldl w11
-    dec
-    stl w11
-
-    ldl w10
-    lu
-    stl w0
-    jal con_putc
-
-    j .pi_rev
-
-.pi_zero:
-    b $30
-    stl w0
-    jal con_putc
-
-.pi_done:
-    ldl w14
-    jr
+.Lfac_fail:
+  i0
+  stl w0
+  ldl w14
+  jr
