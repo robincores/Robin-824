@@ -26,6 +26,17 @@
 .equ SYS_GOTO_PEND  0x9006      ; 1 byte
 .equ SYS_END_PEND   0x9007      ; 1 byte
 
+; Per-RUN context (set by prog_run_loop)
+.equ SYS_CUR_LINE_LO 0x9008      ; current executing line (lo)
+.equ SYS_CUR_LINE_HI 0x9009      ; current executing line (hi7)
+.equ SYS_NEXT_LINE_LO 0x900A     ; line number after current (lo) for RETURN
+.equ SYS_NEXT_LINE_HI 0x900B     ; line number after current (hi7) for RETURN
+
+; GOSUB/RETURN stack
+.equ SYS_GOSUB_SP   0x900C       ; depth (0..GOSUB_STACK_MAX)
+.equ GOSUB_STACK_BASE 0x91E0     ; 16 * 2 bytes = 32 bytes (fits before VAR_BASE)
+.equ GOSUB_STACK_MAX  16
+
 .equ PROG_BASE      0xA000
 .equ PROG_LIMIT     0xBE00      ; first forbidden address
 
@@ -58,6 +69,10 @@ start:
   u 0
   sb
   i SYS_END_PEND
+  u 0
+  sb
+
+  i SYS_GOSUB_SP
   u 0
   sb
 
@@ -146,11 +161,11 @@ basic_exec_line:
 
   CALL tok_skip_spaces
 
-  ; empty -> suppress READY, return
+  ; empty -> prompt on, return
   ldl w10
   lu
   i0
-  beqfar .Lbasic_blank
+  beq .Lbasic_empty
 
   ; If we are RUNNING, NEVER treat leading digits as "program entry".
   i SYS_RUNNING
@@ -194,13 +209,13 @@ basic_exec_line:
   ldl w10
   stl w1
   CALL prog_store_line
-  brafar .Lbasic_done
+  bra .Lbasic_done
 
 .Lbasic_delete_line:
   ldl w2
   stl w0
   CALL prog_delete_line
-  brafar .Lbasic_done
+  bra .Lbasic_done
 
   ; ---------------- immediate/direct mode ----------------
 .Lbasic_immediate:
@@ -211,7 +226,7 @@ basic_exec_line:
   CALL stmt_try_end
   ldl w0
   i1
-  beqfar .Lbasic_done
+  beq .Lbasic_done
 
   CALL stmt_try_goto
   ldl w0
@@ -248,6 +263,26 @@ basic_exec_line:
   i1
   beq .Lbasic_done
 
+  CALL stmt_try_rem
+  ldl w0
+  i1
+  beq .Lbasic_done
+
+  CALL stmt_try_input
+  ldl w0
+  i1
+  beq .Lbasic_done
+
+  CALL stmt_try_gosub
+  ldl w0
+  i1
+  beq .Lbasic_done
+
+  CALL stmt_try_return
+  ldl w0
+  i1
+  beq .Lbasic_done
+
   CALL stmt_try_let
   ldl w0
   i1
@@ -259,25 +294,25 @@ basic_exec_line:
   beq .Lbasic_done
 
   ; unknown
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
-  bra .Lbasic_done
+i err_syntax
+stl w0
+CALL bios_puts_z
+CALL bios_crlf
 
-.Lbasic_blank:
-  ; Blank line in REPL: do not spam READY. next loop
-  ; If we're RUNNING, leave SYS_PROMPT untouched.
-  i SYS_RUNNING
-  lu
-  i0
-  bne .Lbasic_done
+; If we are RUNning, abort RUN on syntax error
+i SYS_RUNNING
+lu
+i0
+beq .Lbasic_done
+i SYS_END_PEND
+i1
+sb
+bra .Lbasic_done
 
-  ; suppress READY after blank enter
+.Lbasic_empty:
   i SYS_PROMPT
-  i0
+  i1
   sb
-  bra .Lbasic_done
 
 .Lbasic_done:
   ldl w14

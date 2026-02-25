@@ -2,7 +2,6 @@ package io.github.robincores.r8.device;
 
 import io.github.robincores.r8.system.InterruptSink;
 import io.github.robincores.r8.system.Tickable;
-import javafx.application.Platform;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.image.PixelFormat;
@@ -25,7 +24,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>MODE 1: 320x200, 4bpp bitplanes (16 colors) -> displayed 640x400 (2xX + double-scan Y)</li>
  *   <li>MODE 2: 320x200, 8bpp Mode-X byte-planes (256 colors) -> displayed 640x400 (2xX + double-scan Y)</li>
  *   <li>MODE 3: 160x200, 8bpp Mode-X byte-planes (256 colors) -> displayed 640x400 (4xX + double-scan Y)</li>
- *   <li>MODE 4: Text-only (80x25 @ 8x16) -> displayed 640x400</li>
  * </ul></p>
  *
  * <p><b>Text overlay</b>: 80x25 @ 8x16 (640x400). Text RAM + Font RAM live in the 16K MMIO space.
@@ -54,7 +52,7 @@ public final class VPU implements Tickable {
     // Core registers
     private static final int REG_CTRL       = 0x0000; // bit0 enable, bit1 vblank IRQ enable, bit2 raster IRQ enable
     private static final int REG_STATUS     = 0x0001; // bit0 in-vblank, bit1 frame-ready (W1C), bit2 raster-hit (W1C), bit3 blit-done (W1C)
-    private static final int REG_MODE       = 0x0002; // 0..3 graphics, 4 text-only
+    private static final int REG_MODE       = 0x0002; // 0..3 graphics (no text-only mode)
     private static final int REG_SCAN_L     = 0x0003; // RO (current scanline within full frame, not just visible)
     private static final int REG_SCAN_H     = 0x0004; // RO
     private static final int REG_FB_BASE_L  = 0x0005; // base offset within each plane (low)
@@ -99,6 +97,8 @@ public final class VPU implements Tickable {
 
     // Smooth text horizontal scroll (0..7)
     private static final int REG_TX_FINE_X    = 0x001E;
+    // Overlay personality select: 0=text buffer+font, 1=tile RAM (sprites)
+    private static final int REG_OVL_MODE     = 0x001F; // bit0
 
     // Blitter (VRAM-to-VRAM)
     private static final int REG_BLT_CTRL        = 0x0020; // bit0 START (W1), bit1 FILL, bit2 IRQ_EN, bit7 BUSY(RO)
@@ -120,21 +120,39 @@ public final class VPU implements Tickable {
     private static final int PAL_BASE  = 0x0100;
     private static final int PAL_SIZE  = 0x0200; // 512 bytes
 
+    // Overlay region (personality-dependent)
+    private static final int OVERLAY_BASE = 0x2000;
+    private static final int OVERLAY_SIZE = 0x2000; // 8K
+
+    // OAM / SAT (sprite attribute table)
+    private static final int OAM_BASE  = 0x0300;
+    private static final int OAM_SIZE  = 0x0400; // 1024 bytes
+    private static final int SPRITE_COUNT  = 128;
+    private static final int SPRITE_STRIDE = 8;   // bytes per sprite in OAM
+
+    // Tile format for sprite personality: 8x8, 4bpp packed (2 pixels per byte), 32 bytes per tile.
+    private static final int TILE_BYTES = 32;
+    private static final int TILE_STRIDE_ROW = 4; // 8 pixels / 2 per byte
+
+    // Reserved / scratch
+    private static final int SCRATCH_BASE = 0x0700;
+    private static final int SCRATCH_SIZE = 0x0900; // 2304 bytes
+
     // Text RAM
     private static final int TEXT_COLS   = 80;
     private static final int TEXT_ROWS   = 25;
     private static final int TEXT_CELL_B = 2;
-    private static final int TEXT_BASE   = 0x0300;
+    private static final int TEXT_BASE   = 0x2000;
     private static final int TEXT_SIZE   = (TEXT_COLS * TEXT_ROWS * TEXT_CELL_B); // 4000 bytes
     private static final int TEXT_CELLS  = (TEXT_COLS * TEXT_ROWS); // 2000
     private static final int TEXT_SCANLINES = (TEXT_ROWS * 16); // 400
 
     // Font RAM
-    private static final int FONT_BASE   = 0x1400;
+    private static final int FONT_BASE   = 0x3000;
     private static final int FONT_SIZE   = 0x1000; // 4096 bytes
 
     // Copper list RAM
-    private static final int COPPER_BASE   = 0x2400;
+    private static final int COPPER_BASE   = 0x1000;
     private static final int COPPER_SIZE   = 0x1000; // 4096 bytes
     private static final int COPPER_STRIDE = 8;
 
@@ -142,6 +160,7 @@ public final class VPU implements Tickable {
     private static final int CTRL_ENABLE      = 0x01;
     private static final int CTRL_VBLANK_IRQ  = 0x02;
     private static final int CTRL_RASTER_IRQ  = 0x04;
+    private static final int CTRL_GFX_DIS     = 0x08; // disable graphics underlay (overlay can still draw)
 
     // STATUS bits
     private static final int STATUS_VBLANK = 0x01;
@@ -226,7 +245,16 @@ public final class VPU implements Tickable {
     private int txFineX;  // 0..7
     private int txAttr;   // default attribute used by TX_PORT / TX_CMD
 
+    // Overlay personality (0=text, 1=sprites/tile RAM)
+    private int ovlMode;
+
+    // OAM (sprite attributes) + scratch + tile RAM (overlay sprite personality)
+    private final byte[] oamRam     = new byte[OAM_SIZE];
+    private final byte[] scratchRam = new byte[SCRATCH_SIZE];
+    private final byte[] tileRam    = new byte[OVERLAY_SIZE];
+
     private final byte[] textRam  = new byte[TEXT_SIZE];
+    private final byte[] textResv = new byte[0x60];     // 0x2FA0–0x2FFF (96 bytes) reserved in text personality
     private final byte[] font8x16 = new byte[FONT_SIZE];
 
     // Copper state
@@ -234,7 +262,7 @@ public final class VPU implements Tickable {
     private int copLen;
     private final byte[] copperRam = new byte[COPPER_SIZE];
 
-    private static final int COP_MAX = (COPPER_SIZE / COPPER_STRIDE);
+    private static final int COP_MAX = (COPPER_SIZE / COPPER_STRIDE); // 512
     private final int[] copScanTmp  = new int[COP_MAX];
     private final int[] copRegTmp   = new int[COP_MAX];
     private final int[] copValLoTmp = new int[COP_MAX];
@@ -249,7 +277,7 @@ public final class VPU implements Tickable {
 
     private int copCount;
     private int copIdx;
-    private final int[] copCounts = new int[512];
+    private final int[] copCounts;
 
     // Copper decode caching (static lists shouldn't re-decode every frame)
     private boolean copDirty = true;
@@ -297,7 +325,8 @@ public final class VPU implements Tickable {
     private int[] displayBuf;
     private int[] freeBuf;
     private int[] queuedBuf;
-    private final AtomicBoolean blitPending = new AtomicBoolean(false);
+    // Emulation thread sets this when a new frame is ready; FX thread clears it on present.
+    private final AtomicBoolean fxDirty = new AtomicBoolean(false);
 
     // Mode 0/1 decode LUT helpers (used only for the non-copper fast path)
     // BITPACK[b] packs the 8 bits of b into 8 nibbles (LSB nibble = leftmost pixel), each nibble is 0 or 1.
@@ -397,11 +426,14 @@ public final class VPU implements Tickable {
         this.txFineX = 0;
         this.txAttr = 0x07;
 
+        this.ovlMode = 0; // default to text personality
+
         this.copCtrl = 0;
         this.copLen = 0;
         Arrays.fill(this.copperRam, (byte) 0);
         this.copDirty = true;
         this.copCompiled = false;
+        this.copCounts = new int[Math.max(1, config.height())];
 
         this.bltCtrl = 0;
         this.bltSrc = this.bltDst = 0;
@@ -453,6 +485,8 @@ public final class VPU implements Tickable {
         txFineX = 0;
         txAttr = 0x07;
 
+        ovlMode = 0;
+
         copCtrl = 0;
         copLen = 0;
         copCount = 0;
@@ -476,6 +510,10 @@ public final class VPU implements Tickable {
         if (hard) {
             Arrays.fill(vram, (byte) 0);
             Arrays.fill(copperRam, (byte) 0);
+            Arrays.fill(oamRam, (byte) 0);
+            Arrays.fill(scratchRam, (byte) 0);
+            Arrays.fill(tileRam, (byte) 0);
+            Arrays.fill(textResv, (byte) 0);
             initDefaultPaletteRgb565();
             initDefaultTextRam();
             initDefaultFont8x16();
@@ -565,7 +603,7 @@ public final class VPU implements Tickable {
     public byte readMmio(int offset) {
         int o = offset & 0x3FFF;
 
-        // Palette RAM
+        // Palette RAM (256 x RGB565 little-endian)
         if (o >= PAL_BASE && o < (PAL_BASE + PAL_SIZE)) {
             int idx = (o - PAL_BASE) >> 1;
             boolean hi = ((o - PAL_BASE) & 1) != 0;
@@ -573,19 +611,41 @@ public final class VPU implements Tickable {
             return (byte) (hi ? ((v >> 8) & 0xFF) : (v & 0xFF));
         }
 
-        // Text RAM
-        if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
-            return textRam[o - TEXT_BASE];
+        // OAM / SAT (sprite attributes)
+        if (o >= OAM_BASE && o < (OAM_BASE + OAM_SIZE)) {
+            return oamRam[o - OAM_BASE];
         }
 
-        // Font RAM
-        if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
-            return font8x16[o - FONT_BASE];
+        // Reserved / scratch
+        if (o >= SCRATCH_BASE && o < (SCRATCH_BASE + SCRATCH_SIZE)) {
+            return scratchRam[o - SCRATCH_BASE];
         }
 
         // Copper RAM
         if (o >= COPPER_BASE && o < (COPPER_BASE + COPPER_SIZE)) {
             return copperRam[o - COPPER_BASE];
+        }
+
+        // Overlay region (8K): either Text+Font or Tile RAM depending on overlay personality
+        if (o >= OVERLAY_BASE && o < (OVERLAY_BASE + OVERLAY_SIZE)) {
+            int rel = o - OVERLAY_BASE;
+
+            // Sprite personality: 0x2000–0x3FFF is tile RAM (text/font disabled)
+            if ((ovlMode & 0x01) != 0) {
+                return tileRam[rel];
+            }
+
+            // Text personality: 0x2000–0x2F9F text buffer, 0x2FA0–0x2FFF reserved, 0x3000–0x3FFF font
+            if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
+                return textRam[o - TEXT_BASE];
+            }
+            if (o >= (TEXT_BASE + TEXT_SIZE) && o < FONT_BASE) {
+                return textResv[o - (TEXT_BASE + TEXT_SIZE)];
+            }
+            if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
+                return font8x16[o - FONT_BASE];
+            }
+            return 0;
         }
 
         return (byte) switch (o) {
@@ -610,6 +670,7 @@ public final class VPU implements Tickable {
             case REG_TX_ORIGIN_H -> ((txOrigin >>> 8) & 0xFF);
             case REG_TX_FINE_Y -> (txFineY & 0x0F);
             case REG_TX_FINE_X -> (txFineX & 0x07);
+            case REG_OVL_MODE -> (ovlMode & 0x01);
 
             case REG_TX_CMD -> 0;
             case REG_TX_ATTR -> txAttr;
@@ -647,6 +708,7 @@ public final class VPU implements Tickable {
         };
     }
 
+
     public void writeMmio(int offset, byte value) {
         int o = offset & 0x3FFF;
         int v = Byte.toUnsignedInt(value);
@@ -663,15 +725,15 @@ public final class VPU implements Tickable {
             return;
         }
 
-        // Text RAM
-        if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
-            textRam[o - TEXT_BASE] = (byte) v;
+        // OAM / SAT
+        if (o >= OAM_BASE && o < (OAM_BASE + OAM_SIZE)) {
+            oamRam[o - OAM_BASE] = (byte) v;
             return;
         }
 
-        // Font RAM
-        if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
-            font8x16[o - FONT_BASE] = (byte) v;
+        // Scratch
+        if (o >= SCRATCH_BASE && o < (SCRATCH_BASE + SCRATCH_SIZE)) {
+            scratchRam[o - SCRATCH_BASE] = (byte) v;
             return;
         }
 
@@ -682,13 +744,43 @@ public final class VPU implements Tickable {
             return;
         }
 
+        // Overlay region: either Text+Font or Tile RAM depending on overlay personality
+        if (o >= OVERLAY_BASE && o < (OVERLAY_BASE + OVERLAY_SIZE)) {
+            int rel = o - OVERLAY_BASE;
+
+            if ((ovlMode & 0x01) != 0) {
+                // Sprite personality: 0x2000–0x3FFF maps to tile RAM
+                tileRam[rel] = (byte) v;
+                return;
+            }
+
+            // Text personality
+            if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
+                textRam[o - TEXT_BASE] = (byte) v;
+                return;
+            }
+            if (o >= (TEXT_BASE + TEXT_SIZE) && o < FONT_BASE) {
+                textResv[o - (TEXT_BASE + TEXT_SIZE)] = (byte) v;
+                return;
+            }
+            if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
+                font8x16[o - FONT_BASE] = (byte) v;
+                return;
+            }
+            return;
+        }
+
         switch (o) {
             case REG_CTRL -> ctrl = (v & 0xFF);
 
-            case REG_STATUS -> status &= ~v; // W1C (frame/raster/blt)
+            case REG_STATUS -> {
+                // W1C only for event flags. VBLANK is timing-owned and clears automatically.
+                int w1c = v & (STATUS_FRAME | STATUS_RASTER | STATUS_BLT);
+                status &= ~w1c;
+            }
             case REG_MODE -> {
                 int m = (v & 0x07);
-                mode = (m <= 4) ? m : 0;
+                mode = (m <= 3) ? m : 0;
             }
             case REG_FB_BASE_L -> fbBase = (fbBase & 0xFF00) | v;
             case REG_FB_BASE_H -> fbBase = (fbBase & 0x00FF) | (v << 8);
@@ -706,6 +798,7 @@ public final class VPU implements Tickable {
             case REG_TX_ORIGIN_H -> { txOrigin = (txOrigin & 0x00FF) | (v << 8); normalizeTxOrigin(); }
             case REG_TX_FINE_Y -> txFineY = (v & 0x0F);
             case REG_TX_FINE_X -> txFineX = (v & 0x07);
+            case REG_OVL_MODE -> ovlMode = (v & 0x01);
 
             case REG_TX_CMD -> txCommand(v);
             case REG_TX_ATTR -> txAttr = (v & 0xFF);
@@ -743,6 +836,7 @@ public final class VPU implements Tickable {
         }
     }
 
+
     private void bltWriteCtrl(int v) {
         // preserve BUSY bit as RO (bit7)
         int next = (v & 0x7F);
@@ -771,8 +865,9 @@ public final class VPU implements Tickable {
         if (h == 0) h = 1;
         bltHRun = h;
 
-        bltSrcPitchRun = bltSrcPitch & 0xFFFF;
-        bltDstPitchRun = bltDstPitch & 0xFFFF;
+        // Treat pitch as signed 16-bit (so 0xFFB0 becomes -80, etc.)
+        bltSrcPitchRun = (short) (bltSrcPitch & 0xFFFF);
+        bltDstPitchRun = (short) (bltDstPitch & 0xFFFF);
 
         int pm = bltPlaneMask & 0x0F;
         if (pm == 0) pm = 0x0F; // 0 means "all planes" for blitter
@@ -881,7 +976,8 @@ public final class VPU implements Tickable {
         int dstOfs = bltDstCur & 0x3FFF;
 
         if ((bltCtrl & BLT_FILL) != 0) {
-            // Fill uses CPU-data path (subject to SR_ENABLE / BIT_MASK / ROP, like normal writes)
+            // NOTE: Blitter uses the same write-assist registers as the CPU aperture (bitMask/sr*/rop).
+            // They are intentionally *live* (VGA-like): changing them mid-blit affects subsequent blit bytes.
             writeVramPlaneInternal(0, dstOfs, bltFill & 0xFF, false, bltPlaneMaskRun);
         } else {
             // Copy uses latch pipeline: read loads latch0..3 for all planes, write uses latch-src.
@@ -948,27 +1044,45 @@ public final class VPU implements Tickable {
             copperApplyForScanline(y);
         }
 
-        boolean cursorEnabled = frameCursorEnabled;
-
-        boolean transparentBg = (mode == 4) ? false : ((txCtrl & TX_TRANSPARENT_BG) != 0);
-        boolean textActive = (mode == 4) || ((mode != 4) && ((txCtrl & TX_EN) != 0));
-
-        if (mode == 4) {
-            renderTextScanline(y, false, cursorEnabled);
+        if (!frameCopperEnabled && (y & 1) == 1) {
+            int W = config.width();
+            System.arraycopy(renderBuf, (y - 1) * W, renderBuf, y * W, W);
             return;
         }
 
-        if (!frameCopperEnabled && (mode == 0 || mode == 1)) {
-            if (pairDirty) rebuildPairArgb();
-            renderGraphicsScanlineFastBitplanes(y);
+        final int W = config.width();
+        final int rowOfs = y * W;
+
+        // Cursor blink phase is frame-latched (stable) but only applies in text personality.
+        boolean cursorEnabled = frameCursorEnabled;
+
+        boolean gfxDisabled = (ctrl & CTRL_GFX_DIS) != 0;
+
+        boolean spritePersonality = (ovlMode & 0x01) != 0;
+        boolean textPersonality = !spritePersonality;
+
+        if (gfxDisabled) {
+            Arrays.fill(renderBuf, rowOfs, rowOfs + W, palArgb[0]);
         } else {
-            renderGraphicsScanline(y);
+            if (!frameCopperEnabled && (mode == 0 || mode == 1)) {
+                if (pairDirty) rebuildPairArgb();
+                renderGraphicsScanlineFastBitplanes(y);
+            } else {
+                renderGraphicsScanline(y);
+            }
         }
 
-        if (textActive) {
-            renderTextScanline(y, transparentBg, cursorEnabled);
+        if (spritePersonality) {
+            renderSpritesScanline(y);
+        } else if (textPersonality) {
+            boolean transparentBg = (txCtrl & TX_TRANSPARENT_BG) != 0;
+            boolean textActive = (txCtrl & TX_EN) != 0;
+            if (textActive) {
+                renderTextScanline(y, transparentBg, cursorEnabled);
+            }
         }
     }
+
 
     private void publishRenderedFrame() {
         synchronized (fbLock) {
@@ -1125,35 +1239,34 @@ public final class VPU implements Tickable {
     // =====================================================================
 
     private void renderFrameIntoBackBuffer() {
-        boolean blinkPhaseOn = ((txCtrl & TX_CURSOR_BLINK) == 0) || (((frameCounter >> 4) & 1) == 0);
-        boolean cursorEnabled = ((txCtrl & TX_CURSOR_EN) != 0) && blinkPhaseOn;
-
-        boolean textActive;
-        boolean transparentBg;
-
-        if (mode == 4) {
-            textActive = true;
-            transparentBg = false;
-        } else {
-            textActive = (txCtrl & TX_EN) != 0;
-            transparentBg = (txCtrl & TX_TRANSPARENT_BG) != 0;
-        }
-
         final boolean copperEnabled = frameCopperEnabled;
 
         if (!copperEnabled) {
-            // Fast path: whole-frame rendering. Use LUT acceleration in modes 0/1.
-            if (pairDirty) rebuildPairArgb();
+            // Frame-wide (fast) path: no mid-frame register writes.
+            boolean blinkPhaseOn = ((txCtrl & TX_CURSOR_BLINK) == 0) || (((frameCounter >> 4) & 1) == 0);
+            boolean cursorEnabled = ((txCtrl & TX_CURSOR_EN) != 0) && blinkPhaseOn;
 
-            if (mode == 4) {
+            boolean gfxDisabled = (ctrl & CTRL_GFX_DIS) != 0;
+
+            boolean spritePersonality = (ovlMode & 0x01) != 0;
+            boolean textActive = !spritePersonality && ((txCtrl & TX_EN) != 0);
+            boolean transparentBg = ((txCtrl & TX_TRANSPARENT_BG) != 0);
+
+            if (gfxDisabled) {
                 Arrays.fill(renderBuf, palArgb[0]);
-                renderTextIntoBackBuffer(transparentBg, cursorEnabled);
             } else {
+                // Use LUT acceleration in modes 0/1.
+                if (pairDirty) rebuildPairArgb();
                 renderGraphicsModesIntoBackBuffer_FastBitplanes();
-                if (textActive) renderTextIntoBackBuffer(transparentBg, cursorEnabled);
+            }
+
+            if (spritePersonality) {
+                renderSpritesIntoBackBuffer();
+            } else if (textActive) {
+                renderTextIntoBackBuffer(transparentBg, cursorEnabled);
             }
         } else {
-            // Copper path: render scanline-by-scanline so copper writes affect both graphics + overlay.
+            // Copper path: render scanline-by-scanline so copper writes affect graphics + overlay.
             copperBeginFrame();
 
             final int W = config.width();
@@ -1162,15 +1275,27 @@ public final class VPU implements Tickable {
             for (int y = 0; y < H; y++) {
                 copperApplyForScanline(y);
 
+                boolean gfxDisabled = (ctrl & CTRL_GFX_DIS) != 0;
                 int rowOfs = y * W;
-                if (mode == 4) {
+
+                if (gfxDisabled) {
                     Arrays.fill(renderBuf, rowOfs, rowOfs + W, palArgb[0]);
                 } else {
                     renderGraphicsScanline(y);
                 }
 
-                if (textActive) {
-                    renderTextScanline(y, transparentBg, cursorEnabled);
+                boolean spritePersonality = (ovlMode & 0x01) != 0;
+                if (spritePersonality) {
+                    renderSpritesScanline(y);
+                } else {
+                    boolean blinkPhaseOn = ((txCtrl & TX_CURSOR_BLINK) == 0) || (((frameCounter >> 4) & 1) == 0);
+                    boolean cursorEnabled = ((txCtrl & TX_CURSOR_EN) != 0) && blinkPhaseOn;
+
+                    boolean textActive = ((txCtrl & TX_EN) != 0);
+                    if (textActive) {
+                        boolean transparentBg = ((txCtrl & TX_TRANSPARENT_BG) != 0);
+                        renderTextScanline(y, transparentBg, cursorEnabled);
+                    }
                 }
             }
         }
@@ -1178,6 +1303,7 @@ public final class VPU implements Tickable {
         // Publish renderBuf -> queuedBuf (triple buffer)
         publishRenderedFrame();
     }
+
 
     private void rebuildPairArgb() {
         for (int i = 0; i < 256; i++) {
@@ -1519,35 +1645,44 @@ public final class VPU implements Tickable {
     }
 
     private void requestBlit() {
-        if (!blitPending.compareAndSet(false, true)) return;
+        // Best practice: never call Platform.runLater() from the emulation/device thread.
+        // Instead, mark dirty and let the JavaFX pulse (AnimationTimer) present the latest frame.
+        fxDirty.set(true);
+    }
 
-        Platform.runLater(() -> {
-            long t0 = 0;
-            if (PROF) t0 = System.nanoTime();
-            try {
-                int[] pixels;
-                synchronized (fbLock) {
-                    if (queuedBuf != null) {
-                        int[] old = displayBuf;
-                        displayBuf = queuedBuf;
-                        queuedBuf = null;
-                        freeBuf = old;
-                    }
-                    pixels = displayBuf;
+    /**
+     * Present the latest completed frame to the JavaFX {@link Canvas}.
+     *
+     * <p><b>Must</b> be called on the JavaFX Application Thread (e.g. from an {@code AnimationTimer}).</p>
+     * <p>This is intentionally pull-based: the emulation thread only publishes frames and sets a dirty flag.</p>
+     */
+    public void fxPulse() {
+        if (!fxDirty.getAndSet(false)) return;
+
+        long t0 = 0;
+        if (PROF) t0 = System.nanoTime();
+        try {
+            int[] pixels;
+            synchronized (fbLock) {
+                if (queuedBuf != null) {
+                    int[] old = displayBuf;
+                    displayBuf = queuedBuf;
+                    queuedBuf = null;
+                    freeBuf = old;
                 }
-
-                writer.setPixels(
-                        0, 0,
-                        config.width(), config.height(),
-                        ARGB_FORMAT,
-                        pixels, 0, config.width()
-                );
-                gc.drawImage(image, 0, 0, config.canvasWidth(), config.canvasHeight());
-            } finally {
-                if (PROF) profFxBlitNanos += (System.nanoTime() - t0);
-                blitPending.set(false);
+                pixels = displayBuf;
             }
-        });
+
+            writer.setPixels(
+                    0, 0,
+                    config.width(), config.height(),
+                    ARGB_FORMAT,
+                    pixels, 0, config.width()
+            );
+            gc.drawImage(image, 0, 0, config.canvasWidth(), config.canvasHeight());
+        } finally {
+            if (PROF) profFxBlitNanos += (System.nanoTime() - t0);
+        }
     }
 
     private void dumpProf() {
@@ -1607,7 +1742,7 @@ public final class VPU implements Tickable {
             int vHi  = copperRam[pos + 5] & 0xFF;
             int flags = copperRam[pos + 6] & 0xFF;
 
-            if (scan == 0xFFFF || reg == 0xFFFF || (flags & COP_FLAG_END) != 0) break;
+            if ((flags & COP_FLAG_END) != 0) break;
 
             if (scan >= 0 && scan < config.height()) {
                 copScanTmp[n]  = scan;
@@ -1627,8 +1762,8 @@ public final class VPU implements Tickable {
             return;
         }
 
-        int H = config.height();
-        Arrays.fill(copCounts, 0, H, 0);
+        int H = copCounts.length;
+        Arrays.fill(copCounts, 0);
         for (int i = 0; i < n; i++) copCounts[copScanTmp[i]]++;
 
         int sum = 0;
@@ -1914,7 +2049,6 @@ public final class VPU implements Tickable {
             int bg = (attr >> 4) & 0x0F;
 
             int glyphCur = font8x16[(ch << 4) + sub] & 0xFF;
-
             boolean cursorCell = cursorRowActive && (tx == txCurX);
 
             int xBase = tx << 3;
@@ -1986,6 +2120,153 @@ public final class VPU implements Tickable {
                         renderBuf[outIndex] = (p & 0xFF000000) | (~p & 0x00FFFFFF);
                     }
                 }
+            }
+        }
+    }
+
+    // =====================================================================
+    // Sprites (overlay sprite personality)
+    // =====================================================================
+
+    /**
+     * Sprite OAM entry format (8 bytes per sprite):
+     * <pre>
+     * [0] Y low
+     * [1] X low
+     * [2] TILE (0..255) — 8x8 tile index (tile size = 32 bytes)
+     * [3] ATTR:
+     *     bit0  EN
+     *     bit1  HFLIP
+     *     bit2  VFLIP
+     *     bit3  BEHIND (draw only on background color 0)
+     *     bits4-7 PAL (0..15) => palette base = PAL<<4
+     * [4] XYHI:
+     *     bits0-1 X[9:8]
+     *     bits2-3 Y[9:8]
+     * [5..7] reserved
+     * </pre>
+     *
+     * Tile RAM format (sprite personality):
+     * <ul>
+     *   <li>8x8, 4bpp packed (2 pixels per byte)</li>
+     *   <li>High nibble = left pixel, low nibble = right pixel</li>
+     *   <li>Nibble 0 is transparent</li>
+     *   <li>Final CLUT index = (PAL&lt;&lt;4) | nibble</li>
+     * </ul>
+     */
+    private void renderSpritesIntoBackBuffer() {
+        final int H = config.height();
+        for (int y = 0; y < H; y++) {
+            renderSpritesScanline(y);
+        }
+    }
+
+    /**
+     * Render sprites for an output scanline.
+     *
+     * <p><b>Coordinate space</b>: sprite X/Y are expressed in <b>source pixels</b> for the current graphics mode,
+     * not in output (scaled) pixels.
+     *
+     * <ul>
+     *   <li>MODE 0: source = 640x200 (scaleX=1, double-scan Y)</li>
+     *   <li>MODE 1/2: source = 320x200 (scaleX=2, double-scan Y)</li>
+     *   <li>MODE 3: source = 160x200 (scaleX=4, double-scan Y)</li>
+     * </ul>
+     * This makes sprites track the active mode's scaling, so they stay visually consistent with the underlay.
+     */
+    private void renderSpritesScanline(int yOut) {
+        // Sprites exist only in sprite/tile overlay personality.
+        if ((ovlMode & 0x01) == 0) return;
+
+        final int W = config.width();
+        final int rowOfs = yOut * W;
+
+        // Output is always double-scanned in Y (200 -> 400), so both output lines map to the same source line.
+        final int ySrc = (yOut >> 1);
+        if (ySrc < 0 || ySrc >= 200) return;
+
+        // Horizontal scaling factor (source pixels -> output pixels)
+        final int scaleX = switch (mode) {
+            case 0 -> 1;
+            case 1, 2 -> 2;
+            default -> 4; // mode 3
+        };
+
+        // Sprite RAM layout:
+        //   OAM: 128 sprites, 8 bytes each @ OAM_BASE
+        //     +0 Y low
+        //     +1 X low
+        //     +2 TILE index
+        //     +3 ATTR: bit0 EN, bit1 HFLIP, bit2 VFLIP, bits4-7 PALBANK
+        //     +4 XYHI: bits0-1=X[9:8], bits2-3=Y[9:8]
+        //   Tile RAM: 8x8, 4bpp, 32 bytes/tile (row=4 bytes, 2 pixels/byte)
+
+        for (int i = 0; i < 128; i++) {
+            int o = i * 8;
+            int yLo = oamRam[o + 0] & 0xFF;
+            int xLo = oamRam[o + 1] & 0xFF;
+            int tile = oamRam[o + 2] & 0xFF;
+            int attr = oamRam[o + 3] & 0xFF;
+            int xyhi = oamRam[o + 4] & 0xFF;
+
+            if ((attr & 0x01) == 0) continue; // not enabled
+
+            int x = xLo | ((xyhi & 0x03) << 8);         // source-space X
+            int y = yLo | ((xyhi & 0x0C) << 6);         // source-space Y
+
+            int dy = ySrc - y;
+            if (dy < 0 || dy >= 8) continue;
+            boolean hflip = (attr & 0x02) != 0;
+            boolean vflip = (attr & 0x04) != 0;
+            boolean behind = (attr & 0x08) != 0;
+            final int bgArgb = palArgb[0];
+            if (vflip) dy = 7 - dy;
+            int palBase = (attr >>> 4) << 4;            // 16-color bank
+            int tileBase = tile * 32;
+            int rowBase = tileBase + (dy * 4);
+
+            // Quick clip: convert sprite left edge to output pixels.
+            int xOut0 = x * scaleX;
+            if (xOut0 >= W || (xOut0 + (8 * scaleX) - 1) < 0) continue;
+
+            for (int tx = 0; tx < 8; tx++) {
+                int px = hflip ? (7 - tx) : tx;
+                int b = tileRam[rowBase + (px >> 1)] & 0xFF;
+                int pix = ((px & 1) == 0) ? ((b >>> 4) & 0x0F) : (b & 0x0F);
+                if (pix == 0) continue; // transparent
+
+                int argb = palArgb[palBase | pix];
+
+                int outX = (x + tx) * scaleX;
+                if (outX < 0) continue;
+                if (outX >= W) break;
+
+                // Write horizontally scaled pixels.
+
+                switch (scaleX) {
+                    case 1 -> {
+                        int dst = rowOfs + outX;
+                        if (!behind || renderBuf[dst] == bgArgb) renderBuf[dst] = argb;
+                    }
+                    case 2 -> {
+                        int p = rowOfs + outX;
+                        int end = rowOfs + W;
+                        if (p < end) {
+                            if (!behind || renderBuf[p] == bgArgb) renderBuf[p] = argb;
+                            if (p + 1 < end) {
+                                if (!behind || renderBuf[p + 1] == bgArgb) renderBuf[p + 1] = argb;
+                            }
+                        }
+                    }
+                    default -> {
+                        int p = rowOfs + outX;
+                        int end = Math.min(rowOfs + W, p + 4);
+                        for (int k = p; k < end; k++) {
+                            if (!behind || renderBuf[k] == bgArgb) renderBuf[k] = argb;
+                        }
+                    }
+                }
+
             }
         }
     }

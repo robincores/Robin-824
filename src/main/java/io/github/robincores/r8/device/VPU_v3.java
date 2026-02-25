@@ -84,6 +84,12 @@ public final class VPU_v3 implements Tickable {
     // Plane enable mask (repurpose of old WR_PLANE_MASK)
     private static final int REG_BPL_MASK     = 0x000D; // bits0..7
 
+    // Per-plane base pointers (Amiga-style): each bitplane can point to a different 16K window.
+    // Effective byte address used by the renderer is: (fbBase + bplBase[p] + row*bpl + byteOfs) & 0x3FFF
+    private static final int REG_BPL0_BASE_L  = 0x0040; // plane 0 base low
+    private static final int REG_BPL0_BASE_H  = 0x0041; // plane 0 base high (only bits0..5 used)
+    private static final int REG_BPL_BASE_STRIDE = 2;   // two bytes per plane
+
     // Copper
     private static final int REG_COP_CTRL    = 0x0016; // bit0 enable
     private static final int REG_COP_LEN_L   = 0x0017;
@@ -120,6 +126,10 @@ public final class VPU_v3 implements Tickable {
     private static final int REG_BLT_FILL        = 0x002C;
     private static final int REG_BLT_PLANE_MASK  = 0x002D; // bits0..7 (0 => all)
 
+    // Blitter extensions (v4-ish): simple ROP + source bit shift for unaligned blits
+    private static final int REG_BLT_ROP         = 0x002E; // 0=COPY,1=OR,2=AND,3=XOR
+    private static final int REG_BLT_SHIFT       = 0x002F; // 0..7 (bit shift within byte; uses byte lookahead)
+
     // Playfield layering / parallax
     private static final int REG_PF0_SCROLL_X_L  = 0x0030;
     private static final int REG_PF0_SCROLL_X_H  = 0x0031;
@@ -136,15 +146,19 @@ public final class VPU_v3 implements Tickable {
     // Sprites
     private static final int REG_SPR_CTRL        = 0x0039; // bit0 enable
 
+    // Sprite collision (read-only hit flags; cleared each frame and via REG_COL_CLR)
+    private static final int REG_COL_HIT_BASE  = 0x0060; // 16 bytes: one bit per sprite
+    private static final int REG_COL_CLR       = 0x0070; // write any value to clear hit flags
+
     // Palette RAM (256 x RGB565 little-endian)
     private static final int PAL_BASE  = 0x0100;
     private static final int PAL_SIZE  = 0x0200;
 
     // OAM (sprites)
     private static final int OAM_BASE  = 0x0300;
-    private static final int OAM_SIZE  = 0x0400; // 1024
+    private static final int OAM_SIZE  = 0x0800; // 2048 (128 sprites � 16 bytes)
     private static final int SPRITE_COUNT  = 128;
-    private static final int SPRITE_STRIDE = 8;
+    private static final int SPRITE_STRIDE = 16;
 
     // Copper list RAM
     private static final int COPPER_BASE   = 0x1000;
@@ -157,8 +171,12 @@ public final class VPU_v3 implements Tickable {
     private static final int TEXT_CELL_B = 2;
     private static final int TEXT_CELLS  = TEXT_COLS * TEXT_ROWS;
     private static final int TEXT_BASE   = 0x2000;
-    private static final int TEXT_SIZE   = TEXT_CELLS * TEXT_CELL_B; // 4000
+    private static final int TEXT_SIZE   = TEXT_CELLS * TEXT_CELL_B; // 4000 (0x0FA0)
     private static final int TEXT_SCANLINES = TEXT_ROWS * 16; // 400
+
+    /** Preserve v2 layout: 0x2FA0..0x2FFF reserved (96 bytes) */
+    private static final int TEXT_RESV_BASE = (TEXT_BASE + TEXT_SIZE); // 0x2FA0
+    private static final int TEXT_RESV_SIZE = (0x3000 - TEXT_RESV_BASE); // 0x60
 
     private static final int FONT_BASE   = 0x3000;
     private static final int FONT_SIZE   = 0x1000; // 4096 (256*16)
@@ -185,6 +203,7 @@ public final class VPU_v3 implements Tickable {
     private static final int TX_TRANSPARENT_BG = 0x04;
     private static final int TX_CURSOR_BLINK   = 0x08;
 
+    private static final int TX_CHAR_BLINK     = 0x10; // TX_CTRL bit4: interpret attr bit7 as blink (VGA-style), bg becomes 0..7
     // Copper
     private static final int COP_CTRL_EN       = 0x01;
     private static final int COP_FLAG_WRITE16  = 0x01;
@@ -204,6 +223,10 @@ public final class VPU_v3 implements Tickable {
     private static final int BLT_BUSY_RO = 0x80;
 
     private static final int BLT_CYCLES_PER_BYTE = 2;
+
+    // SPR_CTRL bits
+    private static final int SPR_EN        = 0x01;
+    private static final int SPR_SIGNED_XY = 0x02; // interpret 10-bit X/Y as signed (-512..511)
 
     // =====================================================================
     // Wiring
@@ -242,6 +265,7 @@ public final class VPU_v3 implements Tickable {
     private final byte[] copperRam = new byte[COPPER_SIZE];
 
     private final byte[] textRam  = new byte[TEXT_SIZE];
+    private final byte[] textResv = new byte[TEXT_RESV_SIZE]; // 0x2FA0..0x2FFF
     private final byte[] font8x16 = new byte[FONT_SIZE];
 
     // Registers
@@ -250,6 +274,8 @@ public final class VPU_v3 implements Tickable {
     private int mode;
     private int fbBase;
     private int scanline;
+
+    private final int[] bplBase = new int[NUM_PLANES]; // per-plane base offsets (16K addressing)
 
     private int xPan;
     private int bplMask;
@@ -263,6 +289,16 @@ public final class VPU_v3 implements Tickable {
     private int pf1PalBase;
 
     private int sprCtrl;
+
+    // Sprite collision state
+    private static final int COL_HIT_BYTES = (SPRITE_COUNT + 7) / 8;
+    private final byte[] colHit = new byte[COL_HIT_BYTES];
+    private final byte[] colLineId;   // per-output-pixel collision group id (scanline only)
+    private final byte[] colLineSpr;  // per-output-pixel last sprite index (scanline only)
+    private final int[]  colLineGen;  // per-output-pixel generation stamp (scanline only)
+    private int colStamp = 1;
+    private boolean frameAnyCollide = false;
+    private int frameMaxSpriteHead = -1;
 
     // Raster IRQ
     private int rasterCmp;
@@ -290,6 +326,26 @@ public final class VPU_v3 implements Tickable {
     private int copCount;
     private int copIdx;
 
+    // ---------------------------------------------------------------------
+    // Scratch buffers (avoid per-scanline / per-compile allocations)
+    // ---------------------------------------------------------------------
+
+    /** Per-plane 8-pixel byte window for PF0/PF1 assembly (indexed by plane number). */
+    private final int[] pfBytes0 = new int[NUM_PLANES];
+    private final int[] pfBytes1 = new int[NUM_PLANES];
+
+    /** Enabled plane lists for PF0/PF1 (packed plane indices, rebuilt per scanline). */
+    private final int[] pf0PlaneList = new int[NUM_PLANES];
+    private final int[] pf1PlaneList = new int[NUM_PLANES];
+
+    /** Copper counting-sort scratch (sizes are bounded, so we allocate once). */
+    private final int[] copScanTmp  = new int[COP_MAX];
+    private final int[] copRegTmp   = new int[COP_MAX];
+    private final int[] copValLoTmp = new int[COP_MAX];
+    private final int[] copValHiTmp = new int[COP_MAX];
+    private final int[] copFlagsTmp = new int[COP_MAX];
+    private final int[] copCounts;
+
     // Blitter
     private int bltCtrl;
     private int bltSrc, bltDst;
@@ -297,11 +353,15 @@ public final class VPU_v3 implements Tickable {
     private int bltSrcPitch, bltDstPitch;
     private int bltFill;
     private int bltPlaneMask;
+    private int bltRop;
+    private int bltShift;
 
     private boolean bltBusy;
     private int bltWRun, bltHRun;
     private int bltSrcPitchRun, bltDstPitchRun;
     private int bltPlaneMaskRun;
+    private int bltRopRun;
+    private int bltShiftRun;
     private int bltX, bltY;
     private int bltSrcCur, bltDstCur;
     private int bltCyclesAcc;
@@ -319,22 +379,97 @@ public final class VPU_v3 implements Tickable {
     private static final int TILE_BYTES = 32;      // 8x8 4bpp
     private static final int TILE_ROW_BYTES = 4;   // 8 pixels / 2 per byte
 
+    // =====================================================================
+    // Text fast-path LUTs (ported from v2)
+    // =====================================================================
+
+    // BITPACK[b] packs the 8 bits of b into 8 nibbles (LSB nibble = leftmost pixel), each nibble is 0 or 1.
+    private static final int[] BITPACK = new int[256];
+    static {
+        for (int b = 0; b < 256; b++) {
+            int p = 0;
+            for (int i = 0; i < 8; i++) {
+                int bit = (b >>> (7 - i)) & 1;      // leftmost is bit7
+                p |= (bit << (i * 4));
+            }
+            BITPACK[b] = p;
+        }
+    }
+
+    // TEXT_PAIR4[(glyphByte<<8)|attr] -> packed 4 bytes, each byte is (leftIdx | (rightIdx<<4)).
+    private static final int[] TEXT_PAIR4 = new int[256 * 256];
+    static {
+        for (int glyph = 0; glyph < 256; glyph++) {
+            int pb = BITPACK[glyph];
+            for (int attr = 0; attr < 256; attr++) {
+                int fg = attr & 0x0F;
+                int bg = (attr >>> 4) & 0x0F;
+
+                int packedPairs = 0;
+                for (int k = 0; k < 4; k++) {
+                    int n0 = (pb >>> ((2 * k) * 4)) & 1;
+                    int n1 = (pb >>> ((2 * k + 1) * 4)) & 1;
+
+                    int left  = bg ^ (-(n0) & (bg ^ fg));
+                    int right = bg ^ (-(n1) & (bg ^ fg));
+
+                    int pair = (left & 0x0F) | ((right & 0x0F) << 4);
+                    packedPairs |= (pair << (k * 8));
+                }
+                TEXT_PAIR4[(glyph << 8) | attr] = packedPairs;
+            }
+        }
+    }
+
+    // Pair LUT maps two 4-bit indices (packed lowNibble=left, highNibble=right) to two ARGB ints in a long.
+    private final long[] pairArgb = new long[256];
+    private boolean pairDirty = true;
+
+    /**
+     * JavaFX constructor (legacy): renders into an internal {@link WritableImage} and draws it onto the provided {@link Canvas}.
+     * <p>
+     * For best performance, prefer {@link #VPU_v3(DisplayConfig, InterruptSink, int, WritableImage)} and present the image via an
+     * {@code ImageView} (Canvas adds an extra rendering stage).
+     */
     public VPU_v3(DisplayConfig config, InterruptSink sink, int irqBit, Canvas canvas) {
+        this(config, sink, irqBit, canvas, null);
+    }
+
+    /**
+     * High-performance JavaFX constructor: renders into the provided {@link WritableImage}.
+     * <p>
+     * Attach {@code targetImage} to an {@code ImageView} and add it to the scene graph; no Canvas draw pass is used.
+     */
+    public VPU_v3(DisplayConfig config, InterruptSink sink, int irqBit, WritableImage targetImage) {
+        this(config, sink, irqBit, null, targetImage);
+    }
+
+    private VPU_v3(DisplayConfig config, InterruptSink sink, int irqBit, Canvas canvas, WritableImage targetImage) {
         this.config = config;
         this.sink = sink;
         this.irqBit = irqBit;
         this.canvas = canvas;
 
-        canvas.setWidth(config.canvasWidth());
-        canvas.setHeight(config.canvasHeight());
+        this.copCounts = new int[config.height()];
 
-        this.image = new WritableImage(config.width(), config.height());
+        if (canvas != null) {
+            canvas.setWidth(config.canvasWidth());
+            canvas.setHeight(config.canvasHeight());
+        }
+
+        this.image = (targetImage != null) ? targetImage : new WritableImage(config.width(), config.height());
         this.writer = image.getPixelWriter();
 
-        this.gc = canvas.getGraphicsContext2D();
-        this.gc.setImageSmoothing(false);
+        this.gc = (canvas != null) ? canvas.getGraphicsContext2D() : null;
+        if (this.gc != null) {
+            this.gc.setImageSmoothing(false);
+        }
 
         int npx = config.width() * config.height();
+
+        this.colLineId  = new byte[config.width()];
+        this.colLineSpr = new byte[config.width()];
+        this.colLineGen = new int[config.width()];
         this.renderBuf  = new int[npx];
         this.displayBuf = new int[npx];
         this.freeBuf    = new int[npx];
@@ -358,6 +493,7 @@ public final class VPU_v3 implements Tickable {
         status = 0;
         mode = 0;          // HIRES
         fbBase = 0;
+        Arrays.fill(bplBase, 0);
         xPan = 0;
         bplMask = 0x0F;    // default 4 planes
 
@@ -367,7 +503,7 @@ public final class VPU_v3 implements Tickable {
         pf0PalBase = 0;
         pf1PalBase = 16;
 
-        sprCtrl = 0x01; // sprites enabled by default
+        sprCtrl = SPR_EN; // sprites enabled by default
 
         rasterCmp = 0;
 
@@ -395,17 +531,24 @@ public final class VPU_v3 implements Tickable {
         bltSrcPitch = bltDstPitch = 0;
         bltFill = 0;
         bltPlaneMask = 0xFF;
+        bltRop = 0;
+        bltShift = 0;
         bltCyclesAcc = 0;
 
         scanline = 0;
         cycleAccum = 0;
         frameCounter = 0;
 
+        pairDirty = true;
+
+        Arrays.fill(colHit, (byte) 0);
+
         if (hard) {
             Arrays.fill(vram, (byte) 0);
             Arrays.fill(sprBank, (byte) 0);
             Arrays.fill(oamRam, (byte) 0);
             Arrays.fill(copperRam, (byte) 0);
+            Arrays.fill(textResv, (byte) 0);
             initDefaultPaletteRgb565();
             initDefaultTextRam();
             initDefaultFont8x16();
@@ -467,12 +610,28 @@ public final class VPU_v3 implements Tickable {
             return copperRam[o - COPPER_BASE];
         }
 
-        // Text + font
+        // Text personality layout: TEXT + reserved gap + FONT
         if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
             return textRam[o - TEXT_BASE];
         }
+        if (o >= TEXT_RESV_BASE && o < FONT_BASE) {
+            return textResv[o - TEXT_RESV_BASE];
+        }
         if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
             return font8x16[o - FONT_BASE];
+        }
+
+        // Per-plane base pointers
+        if (o >= REG_BPL0_BASE_L && o < (REG_BPL0_BASE_L + (NUM_PLANES * REG_BPL_BASE_STRIDE))) {
+            int p = (o - REG_BPL0_BASE_L) >> 1;
+            boolean hi = ((o - REG_BPL0_BASE_L) & 1) != 0;
+            int base = bplBase[p] & 0x3FFF;
+            return (byte) (hi ? ((base >>> 8) & 0x3F) : (base & 0xFF));
+        }
+
+        // Collision hit flags
+        if (o >= REG_COL_HIT_BASE && o < (REG_COL_HIT_BASE + COL_HIT_BYTES)) {
+            return colHit[o - REG_COL_HIT_BASE];
         }
 
         return (byte) switch (o) {
@@ -534,6 +693,8 @@ public final class VPU_v3 implements Tickable {
             case REG_BLT_DST_PITCH_H -> ((bltDstPitch >>> 8) & 0xFF);
             case REG_BLT_FILL -> (bltFill & 0xFF);
             case REG_BLT_PLANE_MASK -> (bltPlaneMask & 0xFF);
+            case REG_BLT_ROP -> (bltRop & 0x03);
+            case REG_BLT_SHIFT -> (bltShift & 0x07);
 
             default -> 0;
         };
@@ -551,6 +712,7 @@ public final class VPU_v3 implements Tickable {
             int next = hi ? ((cur & 0x00FF) | (v << 8)) : ((cur & 0xFF00) | v);
             pal565[idx] = (short) next;
             palArgb[idx] = rgb565ToArgb(next);
+            pairDirty = true;
             return;
         }
 
@@ -567,13 +729,33 @@ public final class VPU_v3 implements Tickable {
             return;
         }
 
-        // Text + font
+        // Text personality layout: TEXT + reserved gap + FONT
         if (o >= TEXT_BASE && o < (TEXT_BASE + TEXT_SIZE)) {
             textRam[o - TEXT_BASE] = (byte) v;
             return;
         }
+        if (o >= TEXT_RESV_BASE && o < FONT_BASE) {
+            textResv[o - TEXT_RESV_BASE] = (byte) v;
+            return;
+        }
         if (o >= FONT_BASE && o < (FONT_BASE + FONT_SIZE)) {
             font8x16[o - FONT_BASE] = (byte) v;
+            return;
+        }
+
+        // Per-plane base pointers
+        if (o >= REG_BPL0_BASE_L && o < (REG_BPL0_BASE_L + (NUM_PLANES * REG_BPL_BASE_STRIDE))) {
+            int p = (o - REG_BPL0_BASE_L) >> 1;
+            boolean hi = ((o - REG_BPL0_BASE_L) & 1) != 0;
+            int cur = bplBase[p] & 0x3FFF;
+            int next = hi ? ((cur & 0x00FF) | ((v & 0x3F) << 8)) : ((cur & 0x3F00) | v);
+            bplBase[p] = next & 0x3FFF;
+            return;
+        }
+
+        // Collision clear
+        if (o == REG_COL_CLR) {
+            Arrays.fill(colHit, (byte) 0);
             return;
         }
 
@@ -637,6 +819,8 @@ public final class VPU_v3 implements Tickable {
             case REG_BLT_DST_PITCH_H -> bltDstPitch = (bltDstPitch & 0x00FF) | (v << 8);
             case REG_BLT_FILL -> bltFill = (v & 0xFF);
             case REG_BLT_PLANE_MASK -> bltPlaneMask = (v & 0xFF);
+            case REG_BLT_ROP -> bltRop = (v & 0x03);
+            case REG_BLT_SHIFT -> bltShift = (v & 0x07);
 
             default -> { /* ignore */ }
         }
@@ -707,8 +891,26 @@ public final class VPU_v3 implements Tickable {
         boolean blinkPhaseOn = ((txCtrl & TX_CURSOR_BLINK) == 0) || (((frameCounter >> 4) & 1) == 0);
         frameCursorEnabled = ((txCtrl & TX_CURSOR_EN) != 0) && blinkPhaseOn;
 
-        // reset copper cursor for this frame
+        Arrays.fill(colHit, (byte) 0);
+
+// reset copper cursor for this frame
         copIdx = 0;
+
+// Frame-latch collision presence and max enabled sprite index
+        frameAnyCollide = false;
+        frameMaxSpriteHead = -1;
+        if ((sprCtrl & SPR_EN) != 0) {
+            for (int i = 0; i < SPRITE_COUNT; i++) {
+                int o = i * SPRITE_STRIDE;
+                int attr = oamRam[o + 5] & 0xFF; // ATTR byte
+                if ((attr & 0x01) != 0) {
+                    frameMaxSpriteHead = i;
+                    if ((attr & 0x20) != 0) { // COLLIDE
+                        frameAnyCollide = true;
+                    }
+                }
+            }
+        }
     }
 
     // =====================================================================
@@ -742,12 +944,10 @@ public final class VPU_v3 implements Tickable {
         if (canCopyDoubledUnderlay) {
             // Copy the already-rendered previous line as an approximation of the *underlay*.
             // BUT: previous line includes text (if text was enabled), so we must handle overlay carefully.
-
             System.arraycopy(renderBuf, (y - 1) * W, renderBuf, rowOfs, W);
 
             if (!textOn) {
-                // If text is OFF, copying is only correct if text was also off on y-1.
-                // Because we only allow this path when !frameLiveRender, txCtrl is stable across the frame.
+                // Because txCtrl is stable when !frameLiveRender, text was also off on y-1.
                 return;
             }
 
@@ -763,6 +963,10 @@ public final class VPU_v3 implements Tickable {
 
         // ---- Full render path (always correct) ----
 
+        if ((sprCtrl & SPR_EN) != 0) {
+            if (frameAnyCollide) beginSpriteCollisionScanline();
+        }
+
         if ((ctrl & CTRL_GFX_DIS) != 0) {
             Arrays.fill(renderBuf, rowOfs, rowOfs + W, palArgb[0]);
         } else {
@@ -770,7 +974,7 @@ public final class VPU_v3 implements Tickable {
         }
 
         // Sprites
-        if ((sprCtrl & 0x01) != 0) {
+        if ((sprCtrl & SPR_EN) != 0) {
             if (pfSplit != 0) {
                 // Back sprites were drawn inside renderPlayfieldsScanline (between PF0/PF1)
                 renderSpritesScanline(y, 1);     // Front group
@@ -786,8 +990,8 @@ public final class VPU_v3 implements Tickable {
     }
 
     private void renderPlayfieldsScanline(int yOut) {
-        final int W = 640;
-        final int ySrc = (yOut >> 1);
+        final int W = config.width(); // expected 640
+        final int ySrc = (yOut >>> 1);
         if (ySrc < 0 || ySrc >= 200) {
             Arrays.fill(renderBuf, yOut * W, yOut * W + W, palArgb[0]);
             return;
@@ -798,14 +1002,13 @@ public final class VPU_v3 implements Tickable {
         final int bpl = lores ? 40 : 80;
 
         final int base = fbBase & 0x3FFF;
-
         final int rowOfs = yOut * W;
 
         final int split = pfSplit & 0x07;
         final boolean dual = split != 0;
 
-        // effective scrolls with legacy xPan applied
-        int fx = xPan & 0x07;
+        // Effective scrolls with legacy xPan applied. Scroll registers are treated as unsigned.
+        final int fx = xPan & 0x07;
 
         final int pf0SX = (pf0ScrollX + fx) % widthSrc;
         final int pf1SX = (pf1ScrollX + fx) % widthSrc;
@@ -813,85 +1016,108 @@ public final class VPU_v3 implements Tickable {
         final int pf0SY = mod200(ySrc + pf0ScrollY);
         final int pf1SY = mod200(ySrc + pf1ScrollY);
 
-        final int pf0ByteOfs = (pf0SX >> 3) % bpl;
-        final int pf1ByteOfs = (pf1SX >> 3) % bpl;
+        final int pf0ByteOfs = (pf0SX >>> 3) % bpl;
+        final int pf1ByteOfs = (pf1SX >>> 3) % bpl;
         final int pf0Shift = pf0SX & 7;
         final int pf1Shift = pf1SX & 7;
 
         final int pf0ShiftAmt = 8 - pf0Shift;
         final int pf1ShiftAmt = 8 - pf1Shift;
 
-        // Precompute which planes are enabled
+        // Precompute which planes are enabled for this scanline.
         final int mask = bplMask & 0xFF;
 
-        // Scratch arrays reused per scanline (avoid per-byte allocations)
-        final int[] pb0 = new int[NUM_PLANES];
-        final int[] pb1 = new int[NUM_PLANES];
+        final int[] pf0Planes = this.pf0PlaneList;
+        final int[] pf1Planes = this.pf1PlaneList;
 
-        // PF0 first
+        int pf0PlaneCount = 0;
+        int pf1PlaneCount = 0;
+
+        if (!dual) {
+            for (int p = 0; p < NUM_PLANES; p++) {
+                if ((mask & (1 << p)) != 0) pf0Planes[pf0PlaneCount++] = p;
+            }
+        } else {
+            for (int p = 0; p < split; p++) {
+                if ((mask & (1 << p)) != 0) pf0Planes[pf0PlaneCount++] = p;
+            }
+            for (int p = split; p < NUM_PLANES; p++) {
+                if ((mask & (1 << p)) != 0) pf1Planes[pf1PlaneCount++] = p;
+            }
+        }
+
+        // Scratch arrays (instance fields) hold the 8-pixel byte window for each plane.
+        final int[] pb0 = this.pfBytes0;
+        final int[] pb1 = this.pfBytes1;
+
+        // Line bases are constant for the whole scanline.
+        final int lineBase0 = (base + pf0SY * bpl) & 0x3FFF;
+        final int lineBase1 = dual ? ((base + pf1SY * bpl) & 0x3FFF) : 0;
+
+        // -----------------------
+        // PF0 pass
+        // -----------------------
         for (int bx = 0; bx < bpl; bx++) {
             int srcBx0 = bx + pf0ByteOfs;
             if (srcBx0 >= bpl) srcBx0 -= bpl;
-            int srcBx0N = (srcBx0 + 1 == bpl) ? 0 : (srcBx0 + 1);
+            final int srcBx0N = (srcBx0 + 1 == bpl) ? 0 : (srcBx0 + 1);
 
-            int lineBase0 = (base + pf0SY * bpl) & 0x3FFF;
-            int oc0 = (lineBase0 + srcBx0) & 0x3FFF;
-            int on0 = (lineBase0 + srcBx0N) & 0x3FFF;
+            final int oc0 = (lineBase0 + srcBx0) & 0x3FFF;
+            final int on0 = (lineBase0 + srcBx0N) & 0x3FFF;
 
-            // aligned plane bytes for this byte group (PF0)
-            Arrays.fill(pb0, 0);
-            for (int p = 0; p < NUM_PLANES; p++) {
-                if ((mask & (1 << p)) == 0) continue;
-                int baseP = p * PLANE_SIZE;
-                int cur = vram[baseP + oc0] & 0xFF;
-                if (pf0Shift == 0) {
-                    pb0[p] = cur;
-                } else {
-                    int nxt = vram[baseP + on0] & 0xFF;
-                    int w = (cur << 8) | nxt;
+            // Load aligned plane bytes for this 8-pixel group (PF0 scroll).
+            if (pf0Shift == 0) {
+                for (int i = 0; i < pf0PlaneCount; i++) {
+                    final int p = pf0Planes[i];
+                    pb0[p] = vram[(p * PLANE_SIZE) + (((bplBase[p] & 0x3FFF) + oc0) & 0x3FFF)] & 0xFF;
+                }
+            } else {
+                for (int i = 0; i < pf0PlaneCount; i++) {
+                    final int p = pf0Planes[i];
+                    final int baseP = p * PLANE_SIZE;
+                    final int cur = vram[baseP + (((bplBase[p] & 0x3FFF) + oc0) & 0x3FFF)] & 0xFF;
+                    final int nxt = vram[baseP + (((bplBase[p] & 0x3FFF) + on0) & 0x3FFF)] & 0xFF;
+                    final int w = (cur << 8) | nxt;
                     pb0[p] = (w >>> pf0ShiftAmt) & 0xFF;
                 }
             }
 
-            int outX = lores ? (bx * 16) : (bx * 8);
-            // 8 pixels
-            for (int i = 0; i < 8; i++) {
-                int bit = 7 - i;
+            final int outX = lores ? (bx << 4) : (bx << 3);
 
+            // 8 pixels in this byte group.
+            for (int i = 0; i < 8; i++) {
+                final int bit = 7 - i;
                 int idx0 = 0;
 
                 if (!dual) {
-                    // single playfield: use plane number as bit position
-                    for (int p = 0; p < NUM_PLANES; p++) {
-                        if ((mask & (1 << p)) == 0) continue;
+                    // Single playfield: plane number is the bit position.
+                    for (int pi = 0; pi < pf0PlaneCount; pi++) {
+                        final int p = pf0Planes[pi];
                         idx0 |= ((pb0[p] >>> bit) & 1) << p;
                     }
-                    int argb = palArgb[idx0 & 0xFF];
+                    final int argb = palArgb[(pf0PalBase + idx0) & 0xFF];
                     if (lores) {
-                        int dst = rowOfs + outX + (i << 1);
+                        final int dst = rowOfs + outX + (i << 1);
                         renderBuf[dst] = argb;
                         renderBuf[dst + 1] = argb;
                     } else {
                         renderBuf[rowOfs + outX + i] = argb;
                     }
                 } else {
-                    // dual playfield: PF0 uses planes [0..split-1]
-                    for (int p = 0; p < split; p++) {
-                        if ((mask & (1 << p)) == 0) continue;
+                    // Dual playfield: PF0 uses planes [0..split-1], palette is PF0_PAL_BASE + idx.
+                    for (int pi = 0; pi < pf0PlaneCount; pi++) {
+                        final int p = pf0Planes[pi];
                         idx0 |= ((pb0[p] >>> bit) & 1) << p;
                     }
 
-                    int c0 = palArgb[(pf0PalBase + idx0) & 0xFF];
-                    int outIndex;
+                    final int c0 = palArgb[(pf0PalBase + idx0) & 0xFF];
                     if (lores) {
-                        outIndex = rowOfs + outX + (i << 1);
-                        renderBuf[outIndex] = c0;
-                        renderBuf[outIndex + 1] = c0;
+                        final int dst = rowOfs + outX + (i << 1);
+                        renderBuf[dst] = c0;
+                        renderBuf[dst + 1] = c0;
                     } else {
-                        outIndex = rowOfs + outX + i;
-                        renderBuf[outIndex] = c0;
+                        renderBuf[rowOfs + outX + i] = c0;
                     }
-
                     // PF1 is drawn in a second pass below (after back sprites).
                 }
             }
@@ -899,48 +1125,54 @@ public final class VPU_v3 implements Tickable {
 
         if (!dual) return;
 
-        // Back sprites between PF0 and PF1
-        if ((sprCtrl & 0x01) != 0) {
+        // Back sprites between PF0 and PF1.
+        if ((sprCtrl & SPR_EN) != 0) {
             renderSpritesScanline(yOut, 0);
         }
 
-        // PF1 overlay pass (uses its own scroll)
+        // -----------------------
+        // PF1 overlay pass
+        // -----------------------
         for (int bx = 0; bx < bpl; bx++) {
             int srcBx1 = bx + pf1ByteOfs;
             if (srcBx1 >= bpl) srcBx1 -= bpl;
-            int srcBx1N = (srcBx1 + 1 == bpl) ? 0 : (srcBx1 + 1);
+            final int srcBx1N = (srcBx1 + 1 == bpl) ? 0 : (srcBx1 + 1);
 
-            int lineBase1 = (base + pf1SY * bpl) & 0x3FFF;
-            int oc1 = (lineBase1 + srcBx1) & 0x3FFF;
-            int on1 = (lineBase1 + srcBx1N) & 0x3FFF;
+            final int oc1 = (lineBase1 + srcBx1) & 0x3FFF;
+            final int on1 = (lineBase1 + srcBx1N) & 0x3FFF;
 
-            Arrays.fill(pb1, 0);
-            for (int p = split; p < NUM_PLANES; p++) {
-                if ((mask & (1 << p)) == 0) continue;
-                int baseP = p * PLANE_SIZE;
-                int cur = vram[baseP + oc1] & 0xFF;
-                if (pf1Shift == 0) {
-                    pb1[p] = cur;
-                } else {
-                    int nxt = vram[baseP + on1] & 0xFF;
-                    int w = (cur << 8) | nxt;
+            if (pf1Shift == 0) {
+                for (int i = 0; i < pf1PlaneCount; i++) {
+                    final int p = pf1Planes[i];
+                    pb1[p] = vram[(p * PLANE_SIZE) + (((bplBase[p] & 0x3FFF) + oc1) & 0x3FFF)] & 0xFF;
+                }
+            } else {
+                for (int i = 0; i < pf1PlaneCount; i++) {
+                    final int p = pf1Planes[i];
+                    final int baseP = p * PLANE_SIZE;
+                    final int cur = vram[baseP + (((bplBase[p] & 0x3FFF) + oc1) & 0x3FFF)] & 0xFF;
+                    final int nxt = vram[baseP + (((bplBase[p] & 0x3FFF) + on1) & 0x3FFF)] & 0xFF;
+                    final int w = (cur << 8) | nxt;
                     pb1[p] = (w >>> pf1ShiftAmt) & 0xFF;
                 }
             }
 
-            int outX = lores ? (bx * 16) : (bx * 8);
+            final int outX = lores ? (bx << 4) : (bx << 3);
+
             for (int i = 0; i < 8; i++) {
-                int bit = 7 - i;
+                final int bit = 7 - i;
                 int idx1 = 0;
-                for (int p = split; p < NUM_PLANES; p++) {
-                    if ((mask & (1 << p)) == 0) continue;
+
+                for (int pi = 0; pi < pf1PlaneCount; pi++) {
+                    final int p = pf1Planes[pi];
                     idx1 |= ((pb1[p] >>> bit) & 1) << (p - split);
                 }
+
                 if (idx1 == 0) continue; // PF1 transparency key
 
-                int c1 = palArgb[(pf1PalBase + idx1) & 0xFF];
+                final int c1 = palArgb[(pf1PalBase + idx1) & 0xFF];
                 if (lores) {
-                    int dst = rowOfs + outX + (i << 1);
+                    final int dst = rowOfs + outX + (i << 1);
                     renderBuf[dst] = c1;
                     renderBuf[dst + 1] = c1;
                 } else {
@@ -949,6 +1181,7 @@ public final class VPU_v3 implements Tickable {
             }
         }
     }
+
 
     private static int mod200(int v) {
         v %= 200;
@@ -959,83 +1192,189 @@ public final class VPU_v3 implements Tickable {
     // =====================================================================
     // Sprites
     // =====================================================================
+    private void beginSpriteCollisionScanline() {
+        // Generation-stamp clear: treat any pixel with gen!=colStamp as empty.
+        // Avoids 2x Arrays.fill(width) per scanline.
+        if (++colStamp == 0) { // wrapped after ~2 days at 60Hz
+            Arrays.fill(colLineGen, 0);
+            colStamp = 1;
+        }
+    }
+
+    private void markSpriteHit(int spriteIndex) {
+        int bi = spriteIndex >>> 3;
+        int bit = spriteIndex & 7;
+        colHit[bi] = (byte) ((colHit[bi] & 0xFF) | (1 << bit));
+    }
 
     /**
-     * OAM entry format (8 bytes per sprite):
+     * OAM entry format (16 bytes per sprite, Lynx-style packed sprite objects).
+     *
      * <pre>
-     * [0] Y low
-     * [1] X low
-     * [2] TILE index (0..255)
-     * [3] ATTR:
-     *     bit0 EN
-     *     bit1 HFLIP
-     *     bit2 VFLIP
-     *     bit3 PRIO (0=back group, 1=front group)
-     *     bits4-7 PAL (0..15): final CLUT = (PAL<<4) | pixNibble
-     * [4] XYHI: bits0-1 X[9:8], bits2-3 Y[9:8]
-     * [5..7] reserved
+     * [0]  Y low
+     * [1]  X low
+     * [2]  XYHI: bits0-1 X[9:8], bits2-3 Y[9:8]
+     * [3]  WIDTH  (1..255, 0=256)
+     * [4]  HEIGHT (1..255, 0=256)
+     * [5]  ATTR:
+     *      bit0 EN
+     *      bit1 HFLIP
+     *      bit2 VFLIP
+     *      bit3 PRIO (0=back, 1=front)
+     *      bit4 SCALE_EN (use SCALE byte)
+     *      bit5 COLLIDE (participate in collision detection)
+     *      bit6 CHAIN (follow LINK to next sprite)
+     *      bit7 TILT_EN (apply TILT_DX per source row)
+     * [6]  PAL (0..15): final CLUT = (PAL<<4) | pixNibble
+     * [7]  SCALE: bits0-1 SCALEX_L2, bits2-3 SCALEY_L2, bits4-7 COL_ID
+     * [8]  DATA_L (sprite data pointer within sprite bank)
+     * [9]  DATA_H
+     * [10] LINK (next sprite index when CHAIN=1)
+     * [11] TILT_DX (signed pixels/row; only when TILT_EN=1)
+     * [12..15] reserved
      * </pre>
-     * Sprite pattern bank (vbank=8) stores 8x8 4bpp packed tiles, 32 bytes each:
-     * high nibble = left pixel, low nibble = right pixel; nibble 0 is transparent.
+     *
+     * Sprite pixel data at DATA pointer:
+     * 4bpp packed, row-major. High nibble = left pixel, low nibble = right pixel.
+     * Nibble 0 is transparent. Row stride in bytes is ceil(WIDTH/2).
      */
     private void renderSpritesScanline(int yOut, int prioGroup) {
         final int ySrc = (yOut >> 1);
         if (ySrc < 0 || ySrc >= 200) return;
 
         final boolean lores = (mode & 0x01) != 0;
-        final int scaleX = lores ? 2 : 1;
-        final int W = 640;
+        final int basePixelW = lores ? 2 : 1;
+        final int W = config.width();
         final int rowOfs = yOut * W;
 
-        for (int i = 0; i < SPRITE_COUNT; i++) {
-            int o = i * SPRITE_STRIDE;
-            int yLo = oamRam[o] & 0xFF;
-            int xLo = oamRam[o + 1] & 0xFF;
-            int tile = oamRam[o + 2] & 0xFF;
-            int attr = oamRam[o + 3] & 0xFF;
-            int xyhi = oamRam[o + 4] & 0xFF;
+        final int maxHead = frameMaxSpriteHead;
+        if (maxHead < 0) return;
 
-            if ((attr & 0x01) == 0) continue;
+        long visitedLo = 0L;
+        long visitedHi = 0L;
 
-            int sprPrio = (attr >>> 3) & 1;
-            if (prioGroup >= 0 && sprPrio != prioGroup) continue;
+        for (int head = 0; head <= maxHead; head++) {
+            int idx = head;
+            int guard = 0;
 
-            int x = xLo | ((xyhi & 0x03) << 8);
-            int y = yLo | ((xyhi & 0x0C) << 6);
+            while (true) {
+                if (guard++ >= SPRITE_COUNT) break;
 
-            int dy = ySrc - y;
-            if (dy < 0 || dy >= 8) continue;
-
-            boolean hflip = (attr & 0x02) != 0;
-            boolean vflip = (attr & 0x04) != 0;
-            if (vflip) dy = 7 - dy;
-
-            int palBase = (attr >>> 4) << 4;
-            int tileBase = tile * TILE_BYTES;
-            int rowBase = tileBase + (dy * TILE_ROW_BYTES);
-
-            int xOut0 = x * scaleX;
-            if (xOut0 >= W || (xOut0 + (8 * scaleX) - 1) < 0) continue;
-
-            for (int tx = 0; tx < 8; tx++) {
-                int px = hflip ? (7 - tx) : tx;
-                int b = sprBank[rowBase + (px >> 1)] & 0xFF;
-                int pix = ((px & 1) == 0) ? ((b >>> 4) & 0x0F) : (b & 0x0F);
-                if (pix == 0) continue;
-
-                int argb = palArgb[(palBase | pix) & 0xFF];
-
-                int outX = (x + tx) * scaleX;
-                if (outX < 0) continue;
-                if (outX >= W) break;
-
-                int dst = rowOfs + outX;
-                if (scaleX == 2) {
-                    if (dst < rowOfs + W) renderBuf[dst] = argb;
-                    if (dst + 1 < rowOfs + W) renderBuf[dst + 1] = argb;
+                // Prevent double-rendering chain members as independent heads and avoid infinite loops.
+                if (idx < 64) {
+                    long bit = 1L << idx;
+                    if ((visitedLo & bit) != 0) break;
+                    visitedLo |= bit;
                 } else {
-                    renderBuf[dst] = argb;
+                    long bit = 1L << (idx - 64);
+                    if ((visitedHi & bit) != 0) break;
+                    visitedHi |= bit;
                 }
+
+                int o = idx * SPRITE_STRIDE;
+
+                int yLo = oamRam[o + 0] & 0xFF;
+                int xLo = oamRam[o + 1] & 0xFF;
+                int xyhi = oamRam[o + 2] & 0xFF;
+                int w = oamRam[o + 3] & 0xFF;
+                int h = oamRam[o + 4] & 0xFF;
+                int attr = oamRam[o + 5] & 0xFF;
+                int pal = oamRam[o + 6] & 0xFF;
+                int scale = oamRam[o + 7] & 0xFF;
+                int dataL = oamRam[o + 8] & 0xFF;
+                int dataH = oamRam[o + 9] & 0xFF;
+                int link = oamRam[o + 10] & 0xFF;
+                int tiltDx = (byte) oamRam[o + 11];
+
+                if ((attr & 0x01) == 0) break;
+
+                int sprPrio = (attr >>> 3) & 1;
+                boolean inGroup = (prioGroup < 0) || (sprPrio == prioGroup);
+
+                if (inGroup) {
+                    if (w == 0) w = 256;
+                    if (h == 0) h = 256;
+
+                    int x = xLo | ((xyhi & 0x03) << 8);
+                    int y = yLo | ((xyhi & 0x0C) << 6);
+
+                    if ((sprCtrl & SPR_SIGNED_XY) != 0) {
+                        if (x >= 512) x -= 1024;
+                        if (y >= 512) y -= 1024;
+                    }
+
+                    boolean hflip = (attr & 0x02) != 0;
+                    boolean vflip = (attr & 0x04) != 0;
+                    boolean scaleEn = (attr & 0x10) != 0;
+                    boolean collide = (attr & 0x20) != 0;
+                    boolean tiltEn = (attr & 0x80) != 0;
+
+                    int sxL2 = scaleEn ? (scale & 0x03) : 0;
+                    int syL2 = scaleEn ? ((scale >>> 2) & 0x03) : 0;
+                    int colId = (scale >>> 4) & 0x0F;
+
+                    int pixelW = basePixelW << sxL2;
+
+                    int scaledH = h << syL2;
+                    int dy = ySrc - y;
+                    if (dy >= 0 && dy < scaledH) {
+                        int rowGroup = (syL2 == 0) ? dy : (dy >>> syL2);
+                        if (rowGroup >= 0 && rowGroup < h) {
+                            int srcRow = vflip ? (h - 1 - rowGroup) : rowGroup;
+
+                            int dataPtr = ((dataL | (dataH << 8)) & 0xFFFF) & (SPR_BANK_SIZE - 1);
+                            int rowStride = (w + 1) >> 1;
+                            int rowBase = (dataPtr + srcRow * rowStride) & (SPR_BANK_SIZE - 1);
+
+                            int shiftOut = 0;
+                            if (tiltEn && tiltDx != 0) {
+                                shiftOut = tiltDx * rowGroup * pixelW;
+                            }
+
+                            int xOut0 = x * basePixelW + shiftOut;
+                            if (xOut0 < W && (xOut0 + (w * pixelW) - 1) >= 0) {
+                                int palBase = (pal & 0x0F) << 4;
+
+                                for (int tx = 0; tx < w; tx++) {
+                                    int px = hflip ? (w - 1 - tx) : tx;
+                                    int b = sprBank[(rowBase + (px >> 1)) & (SPR_BANK_SIZE - 1)] & 0xFF;
+                                    int pix = ((px & 1) == 0) ? ((b >>> 4) & 0x0F) : (b & 0x0F);
+                                    if (pix == 0) continue;
+
+                                    int argb = palArgb[(palBase | pix) & 0xFF];
+                                    int outXBase = xOut0 + tx * pixelW;
+
+                                    for (int sx = 0; sx < pixelW; sx++) {
+                                        int outX = outXBase + sx;
+                                        if (outX < 0) continue;
+                                        if (outX >= W) break;
+                                        if (frameAnyCollide && collide) {
+                                            if (colLineGen[outX] == colStamp) {
+                                                int existingId = colLineId[outX] & 0xFF;
+                                                if (existingId != 0xFF && existingId != colId) {
+                                                    int other = colLineSpr[outX] & 0xFF;
+                                                    if (other < SPRITE_COUNT) {
+                                                        markSpriteHit(other);
+                                                    }
+                                                    markSpriteHit(idx);
+                                                }
+                                            }
+                                            colLineGen[outX] = colStamp;
+                                            colLineId[outX] = (byte) (colId & 0x0F);
+                                            colLineSpr[outX] = (byte) (idx & 0xFF);
+                                        }
+
+                                        renderBuf[rowOfs + outX] = argb;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ((attr & 0x40) == 0) break;
+                idx = link & 0x7F;
+                if (idx == head) break;
             }
         }
     }
@@ -1044,70 +1383,138 @@ public final class VPU_v3 implements Tickable {
     // Text overlay
     // =====================================================================
 
+    private void rebuildPairArgb() {
+        for (int i = 0; i < 256; i++) {
+            int left = i & 0x0F;
+            int right = (i >>> 4) & 0x0F;
+            long lo = palArgb[left] & 0xFFFFFFFFL;
+            long hi = ((long) palArgb[right]) << 32;
+            pairArgb[i] = hi | lo; // low32=left pixel, high32=right pixel
+        }
+        pairDirty = false;
+    }
+
     private void renderTextScanline(int y, boolean transparentBg, boolean cursorEnabled) {
-        final int W = 640;
+        final int W = config.width();
         final int rowOfs = y * W;
 
-        int fineX = txFineX & 0x07;
+        final int fineX = txFineX & 0x07;
+
+        // Optional VGA-style character blink:
+        // When TX_CHAR_BLINK is enabled, attribute bit7 is a blink flag and background becomes 3-bit (0..7).
+        final boolean charBlinkMode = (txCtrl & TX_CHAR_BLINK) != 0;
+        final boolean blinkPhaseOn = ((frameCounter >> 4) & 1) == 0; // ~2.2Hz @ ~70Hz frame rate
 
         int yAdj = y + (txFineY & 0x0F);
         if (yAdj >= TEXT_SCANLINES) yAdj -= TEXT_SCANLINES;
 
-        int ty = (yAdj >> 4);
-        int sub = (yAdj & 0x0F);
+        final int ty = (yAdj >> 4);
+        final int sub = (yAdj & 0x0F);
 
-        int tyScreen = (y >> 4);
-        int subScreen = (y & 0x0F);
-        boolean cursorRowActive = cursorEnabled && (tyScreen == txCurY)
-                && (subScreen >= txCurStart) && (subScreen <= txCurEnd);
+        // Cursor is screen-relative (not scroll-adjusted): stable visual cursor during TX_ORIGIN/TX_FINE_Y scroll.
+        final int tyScreen = (y >> 4);
+        final int subScreen = (y & 0x0F);
+        final boolean cursorRowActive =
+                cursorEnabled && (tyScreen == txCurY) && (subScreen >= txCurStart) && (subScreen <= txCurEnd);
 
-        int cellBase = txOrigin + (ty * TEXT_COLS);
-        cellBase %= TEXT_CELLS;
-        if (cellBase < 0) cellBase += TEXT_CELLS;
+        // Base cell index for this scanline within the ring buffer.
+        int cell = txOrigin + (ty * TEXT_COLS);
+        cell %= TEXT_CELLS;
+        if (cell < 0) cell += TEXT_CELLS;
 
-        for (int tx = 0; tx < TEXT_COLS; tx++) {
-            int cell = cellBase + tx;
-            if (cell >= TEXT_CELLS) cell -= TEXT_CELLS;
+        // Fast path is valid only when:
+        //  - fineX==0 (no inter-cell carry)
+        //  - background is opaque (we must overwrite every pixel)
+        //  - copper is disabled (no mid-scanline register writes)
+        final boolean pairFastPossible = (fineX == 0) && !transparentBg && !frameCopperEnabled;
+        if (pairFastPossible && pairDirty) rebuildPairArgb();
 
-            int cellOfs = cell << 1;
-            int ch = textRam[cellOfs] & 0xFF;
-            int attr = textRam[cellOfs + 1] & 0xFF;
+        for (int col = 0; col < TEXT_COLS; col++) {
+            final int cellOfs = cell << 1;
+            final int ch = textRam[cellOfs] & 0xFF;
+            final int attr = textRam[cellOfs + 1] & 0xFF;
 
-            int fg = (attr & 0x0F);
+            int fg = attr & 0x0F;
             int bg = (attr >>> 4) & 0x0F;
 
             int glyphCur = font8x16[(ch << 4) + sub] & 0xFF;
-            boolean cursorCell = cursorRowActive && (tx == txCurX);
 
-            int xBase = tx << 3;
+            // Apply optional char-blink reinterpretation of attr bit7.
+            // If blink is "off" for this phase, render the character as blank (glyph=0).
+            int attrUsed = attr;
+            if (charBlinkMode && (attr & 0x80) != 0) {
+                bg &= 0x07;
+                attrUsed = (bg << 4) | fg; // clear bit7; bg is 3-bit in blink mode
+                if (!blinkPhaseOn) glyphCur = 0;
+            }
+
+            final boolean cursorCell = cursorRowActive && (col == txCurX);
+            final int xBase = col << 3;
 
             if (fineX == 0) {
-                for (int bit = 7; bit >= 0; bit--) {
-                    boolean on = ((glyphCur >>> bit) & 1) != 0;
-                    int outIndex = rowOfs + xBase + (7 - bit);
-                    if (on) renderBuf[outIndex] = palArgb[fg];
-                    else if (!transparentBg) renderBuf[outIndex] = palArgb[bg];
+                if (pairFastPossible) {
+                    // Opaque, no-copper, no-fineX: emit 2 pixels at a time (4 pairs) using LUTs.
+                    int pairs = TEXT_PAIR4[(glyphCur << 8) | (attrUsed & 0xFF)];
+                    int out = rowOfs + xBase;
+
+                    for (int k = 0; k < 4; k++) {
+                        long pair = pairArgb[pairs & 0xFF];
+                        renderBuf[out] = (int) pair;
+                        renderBuf[out + 1] = (int) (pair >>> 32);
+                        out += 2;
+                        pairs >>>= 8;
+                    }
 
                     if (cursorCell) {
-                        int p = renderBuf[outIndex];
-                        renderBuf[outIndex] = (p & 0xFF000000) | (~p & 0x00FFFFFF);
+                        // Invert the full cell rectangle to keep the cursor visible on any glyph.
+                        for (int i = 0; i < 8; i++) {
+                            int p = renderBuf[rowOfs + xBase + i];
+                            renderBuf[rowOfs + xBase + i] = (p & 0xFF000000) | (~p & 0x00FFFFFF);
+                        }
+                    }
+                } else {
+                    // Correct path for: transparent bg, or copper enabled.
+                    for (int bit = 7; bit >= 0; bit--) {
+                        boolean on = ((glyphCur >>> bit) & 1) != 0;
+                        int outIndex = rowOfs + xBase + (7 - bit);
+
+                        if (on) {
+                            renderBuf[outIndex] = palArgb[fg];
+                        } else if (!transparentBg) {
+                            renderBuf[outIndex] = palArgb[bg];
+                        }
+
+                        if (cursorCell) {
+                            int p = renderBuf[outIndex];
+                            renderBuf[outIndex] = (p & 0xFF000000) | (~p & 0x00FFFFFF);
+                        }
                     }
                 }
             } else {
-                // Carry from next cell
-                int chNext = 0x20, attrNext = txAttr;
-                if (tx + 1 < TEXT_COLS) {
+                // FineX carry path: combine this cell's glyph with the next cell's glyph.
+                int chNext = 0x20;
+                int attrNext = txAttr;
+
+                if (col + 1 < TEXT_COLS) {
                     int cellN = cell + 1;
-                    if (cellN >= TEXT_CELLS) cellN -= TEXT_CELLS;
+                    if (cellN == TEXT_CELLS) cellN = 0;
+
                     int ofsN = cellN << 1;
                     chNext = textRam[ofsN] & 0xFF;
                     attrNext = textRam[ofsN + 1] & 0xFF;
                 }
 
-                int fgN = (attrNext & 0x0F);
+                int fgN = attrNext & 0x0F;
                 int bgN = (attrNext >>> 4) & 0x0F;
 
                 int glyphNext = font8x16[(chNext << 4) + sub] & 0xFF;
+
+                // Apply blink mode to the "next" cell too (so carries from a blinking cell vanish when off).
+                if (charBlinkMode && (attrNext & 0x80) != 0) {
+                    bgN &= 0x07;
+                    if (!blinkPhaseOn) glyphNext = 0;
+                }
+
                 int two = (glyphCur << 8) | glyphNext;
 
                 for (int i = 0; i < 8; i++) {
@@ -1120,8 +1527,11 @@ public final class VPU_v3 implements Tickable {
                     int bgUse = fromNext ? bgN : bg;
 
                     int outIndex = rowOfs + xBase + i;
-                    if (on) renderBuf[outIndex] = palArgb[fgUse];
-                    else if (!transparentBg) renderBuf[outIndex] = palArgb[bgUse];
+                    if (on) {
+                        renderBuf[outIndex] = palArgb[fgUse];
+                    } else if (!transparentBg) {
+                        renderBuf[outIndex] = palArgb[bgUse];
+                    }
 
                     if (cursorCell) {
                         int p = renderBuf[outIndex];
@@ -1129,8 +1539,17 @@ public final class VPU_v3 implements Tickable {
                     }
                 }
             }
+
+            // Next cell in the ring-buffer.
+            cell++;
+            if (cell == TEXT_CELLS) cell = 0;
         }
     }
+
+
+    // =====================================================================
+    // Text helpers (TX_PORT / TX_CMD)
+    // =====================================================================
 
     private void txCommand(int cmd) {
         int c = cmd & 0xFF;
@@ -1160,8 +1579,9 @@ public final class VPU_v3 implements Tickable {
             case 0x0D -> txCurX = 0;
             case 0x08 -> { if (txCurX > 0) txCurX--; }
             case 0x09 -> {
-                txCurX = (txCurX + 8) & ~7;
-                if (txCurX >= TEXT_COLS) txNewline();
+                int nextX = (txCurX + 8) & ~7;
+                if (nextX >= TEXT_COLS) txNewline();
+                else txCurX = nextX;
             }
             default -> {
                 txPutCharAtCursor(ch, txAttr);
@@ -1248,8 +1668,6 @@ public final class VPU_v3 implements Tickable {
     private void copperCompileIfNeeded() {
         if (!copDirty) return;
 
-        copCount = 0;
-
         int len = copLen & 0xFFFF;
         if (len <= 0 || len > COPPER_SIZE) len = COPPER_SIZE;
         len = (len / COPPER_STRIDE) * COPPER_STRIDE;
@@ -1274,10 +1692,12 @@ public final class VPU_v3 implements Tickable {
             }
         }
 
-        // Sort by scanline (stable), using counting sort because scanline range is small (<=400).
-        if (n > 0) {
-            int H = config.height();
-            int[] counts = new int[H];
+        // Stable sort by scanline using counting sort. Height is small (<=400), so this is cheap.
+        if (n > 1) {
+            final int H = config.height();
+            final int[] counts = copCounts;
+
+            Arrays.fill(counts, 0, H, 0);
             for (int i = 0; i < n; i++) counts[copScan[i]]++;
 
             int sum = 0;
@@ -1287,32 +1707,28 @@ public final class VPU_v3 implements Tickable {
                 sum += c;
             }
 
-            int[] scan2 = new int[n];
-            int[] reg2 = new int[n];
-            int[] lo2 = new int[n];
-            int[] hi2 = new int[n];
-            int[] fl2 = new int[n];
-
             for (int i = 0; i < n; i++) {
                 int s = copScan[i];
                 int dst = counts[s]++;
-                scan2[dst] = copScan[i];
-                reg2[dst] = copReg[i];
-                lo2[dst] = copValLo[i];
-                hi2[dst] = copValHi[i];
-                fl2[dst] = copFlags[i];
+
+                copScanTmp[dst]  = copScan[i];
+                copRegTmp[dst]   = copReg[i];
+                copValLoTmp[dst] = copValLo[i];
+                copValHiTmp[dst] = copValHi[i];
+                copFlagsTmp[dst] = copFlags[i];
             }
 
-            System.arraycopy(scan2, 0, copScan, 0, n);
-            System.arraycopy(reg2, 0, copReg, 0, n);
-            System.arraycopy(lo2, 0, copValLo, 0, n);
-            System.arraycopy(hi2, 0, copValHi, 0, n);
-            System.arraycopy(fl2, 0, copFlags, 0, n);
+            System.arraycopy(copScanTmp, 0, copScan, 0, n);
+            System.arraycopy(copRegTmp, 0, copReg, 0, n);
+            System.arraycopy(copValLoTmp, 0, copValLo, 0, n);
+            System.arraycopy(copValHiTmp, 0, copValHi, 0, n);
+            System.arraycopy(copFlagsTmp, 0, copFlags, 0, n);
         }
 
         copCount = n;
         copDirty = false;
     }
+
 
     private void copperApplyForScanline(int y) {
         while (copIdx < copCount && copScan[copIdx] == y) {
@@ -1364,6 +1780,9 @@ public final class VPU_v3 implements Tickable {
         if (pm == 0) pm = 0xFF;
         bltPlaneMaskRun = pm;
 
+        bltRopRun = bltRop & 0x03;
+        bltShiftRun = bltShift & 0x07;
+
         bltX = 0;
         bltY = 0;
 
@@ -1391,10 +1810,33 @@ public final class VPU_v3 implements Tickable {
                 vram[(p * PLANE_SIZE) + dstOfs] = (byte) fill;
             }
         } else {
+            final int rop = bltRopRun & 0x03;
+            final int sh  = bltShiftRun & 0x07;
+
             for (int p = 0; p < NUM_PLANES; p++) {
                 if ((bltPlaneMaskRun & (1 << p)) == 0) continue;
+
                 int baseP = p * PLANE_SIZE;
-                vram[baseP + dstOfs] = vram[baseP + srcOfs];
+
+                int s = vram[baseP + srcOfs] & 0xFF;
+                if (sh != 0) {
+                    // Unaligned blit support: combine current+next byte, then shift by 0..7 bits.
+                    // Semantics: sh=0 -> aligned (use current byte), sh=1 -> shift left by 1 pixel, etc.
+                    int n = vram[baseP + ((srcOfs + 1) & 0x3FFF)] & 0xFF;
+                    int w = (s << 8) | n;
+                    s = (w >>> (8 - sh)) & 0xFF;
+                }
+
+                int d = vram[baseP + dstOfs] & 0xFF;
+                int out;
+                switch (rop) {
+                    case 1 -> out = d | s;
+                    case 2 -> out = d & s;
+                    case 3 -> out = d ^ s;
+                    default -> out = s; // COPY
+                }
+
+                vram[baseP + dstOfs] = (byte) out;
             }
         }
 
@@ -1460,7 +1902,9 @@ public final class VPU_v3 implements Tickable {
         }
 
         writer.setPixels(0, 0, config.width(), config.height(), ARGB_FORMAT, pixels, 0, config.width());
-        gc.drawImage(image, 0, 0, config.canvasWidth(), config.canvasHeight());
+        if (gc != null) {
+            gc.drawImage(image, 0, 0, config.canvasWidth(), config.canvasHeight());
+        }
     }
 
     // =====================================================================
@@ -1585,6 +2029,8 @@ public final class VPU_v3 implements Tickable {
             pal565[i] = (short) v;
             palArgb[i] = rgb565ToArgb(v);
         }
+
+        pairDirty = true;
     }
 
     private static int rgb565ToArgb(int rgb565) {
