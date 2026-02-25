@@ -340,6 +340,11 @@ public class Assembler {
         this.errors.add(new AssemblerError(msg, ln, cc, src));
     }
 
+    void fatalAt(String msg, int line, int col, String source) {
+        warningAt(msg, line, col, source);
+        this.aborted = true;
+    }
+
 
     void fatal(String msg, Integer line) {
         this.warning(msg, line);
@@ -700,6 +705,12 @@ public class Assembler {
         return -(1L << (bits - 1));
     }
 
+    private static long signedMax(int bits) {
+        if (bits <= 0) return 0;
+        if (bits >= 64) return Long.MAX_VALUE;
+        return (1L << (bits - 1)) - 1L;
+    }
+
     // Normalize source so rules don't have to care about whitespace around punctuation.
     // Examples:
     //   "add x1, x2, x3"  -> "add x1,x2,x3"
@@ -948,24 +959,32 @@ public class Assembler {
                             long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
                             xl = (xl - curSec.ip) * ipmul - v.ipofs;
                         }
-                        long max = mask64(v.bits);
+                        long storeMask = mask64(v.bits);
                         long min = signedMin(v.bits);
-                        if (v.bits < 64 && (xl < min || xl > max)) {
+                        long maxFit = v.iprel ? signedMax(v.bits) : storeMask;
+                        if (v.bits < 64 && (xl < min || xl > maxFit)) {
+                            if (v.iprel) {
+                                return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use a far-branch macro (e.g. brafar/beqfar) or 'j'.");
+                            }
                             return new AssemblerErrorResult("Value " + xl + " does not fit in " + v.bits + " bits");
                         }
-                        xl &= max;
+                        xl &= storeMask;
                     }
                 } else {
                     if (v.iprel) {
                         long ipmul = (v.ipmul == 0 ? 1 : v.ipmul);
                         xl = (xl - curSec.ip) * ipmul - v.ipofs;
                     }
-                    long max = mask64(v.bits);
+                    long storeMask = mask64(v.bits);
                     long min = signedMin(v.bits);
-                    if (v.bits < 64 && (xl < min || xl > max)) {
+                    long maxFit = v.iprel ? signedMax(v.bits) : storeMask;
+                    if (v.bits < 64 && (xl < min || xl > maxFit)) {
+                        if (v.iprel) {
+                            return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use a far-branch macro (e.g. brafar/beqfar) or 'j'.");
+                        }
                         return new AssemblerErrorResult("Value " + xl + " does not fit in " + v.bits + " bits");
                     }
-                    xl &= max;
+                    xl &= storeMask;
                 }
             }
 
@@ -1785,13 +1804,18 @@ public class Assembler {
             value = (value - fix.ofs) * fix.ipmul - fix.ipofs;
         }
 
-        long max = mask64(fix.size);
+        long storeMask = mask64(fix.size);
         long min = signedMin(fix.size);
-        if (fix.size < 64 && (value < min || value > max)) {
+        long maxFit = fix.iprel ? signedMax(fix.size) : storeMask;
+        if (fix.size < 64 && (value < min || value > maxFit)) {
             String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
-            warningAt("Value " + value + " does not fit in " + fix.size + " bits" + extra, fix.line, fix.col, fix.source);
+            if (fix.iprel) {
+                fatalAt("IP-relative offset " + value + " out of range for " + fix.size + "-bit signed field (" + min + ".." + maxFit + ")" + extra + ". Use a far-branch macro (e.g. brafar/beqfar) or 'j'.", fix.line, fix.col, fix.source);
+            } else {
+                warningAt("Value " + value + " does not fit in " + fix.size + " bits" + extra, fix.line, fix.col, fix.source);
+            }
         }
-        value &= max;
+        value &= storeMask;
 
         // Match buildInstruction semantics: swap full source width first
         if ("little".equals(fix.endian)) {
