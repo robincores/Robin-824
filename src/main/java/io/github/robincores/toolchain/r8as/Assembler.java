@@ -122,6 +122,7 @@ public class Assembler {
     // Better diagnostics (source + column)
     private String currentSourceName = "<input>";
     private int currentCol = 1; // 1-based, best-effort
+    private String currentInstrText = null; // for fixup diagnostics (best-effort)
 
     // Global listing (source order across sections)
     List<AssemblerLine> asmlines = new ArrayList<>();
@@ -332,6 +333,14 @@ public class Assembler {
         warning(msg, null);
     }
 
+    void warningAt(String msg, int line, int col, String source) {
+        int ln = (line > 0) ? line : this.linenum;
+        int cc = (col > 0) ? col : this.currentCol;
+        String src = (source != null && !source.isBlank()) ? source : this.currentSourceName;
+        this.errors.add(new AssemblerError(msg, ln, cc, src));
+    }
+
+
     void fatal(String msg, Integer line) {
         this.warning(msg, line);
         this.aborted = true;
@@ -434,11 +443,11 @@ public class Assembler {
                     ev = 0L;
                 }
 
-                if (ev == null) {
-                    // forward ref (symbol or expression)
+                if (ev == null || needsRelocationFixup(expr)) {
                     curSec.fixups.add(new AssemblerFixup(
                             expr, startIp + i, this.width, 0, 0, this.width, this.linenum,
-                            false, 0, 1, "big"
+                            false, 0, 1, "big",
+                            this.currentSourceName, this.currentCol, ".byte " + expr
                     ));
                     v = 0;
                 } else {
@@ -487,7 +496,7 @@ public class Assembler {
                     ev = 0L;
                 }
 
-                if (ev == null) {
+                if (ev == null || needsRelocationFixup(expr)) {
                     // forward ref: create one fixup per chunk
                     for (int k = 0; k < chunks; k++) {
                         int srcofs = littleEndian
@@ -505,7 +514,10 @@ public class Assembler {
                                 false,          // iprel
                                 0,              // ipofs
                                 1,              // ipmul
-                                "big"           // IMPORTANT: do NOT swap here; we control order via srcofs
+                                "big",          // IMPORTANT: do NOT swap here; we control order via srcofs
+                                this.currentSourceName,
+                                this.currentCol,
+                                (bits == 16 ? ".word " : (bits == 32 ? ".dword " : (("." + bits) + " "))) + expr
                         ));
                         out[i * chunks + k] = 0;
                     }
@@ -923,10 +935,11 @@ public class Assembler {
                         return new AssemblerErrorResult("Bad expression '" + id + "': " + ex.getMessage());
                     }
 
-                    if (ev == null) {
+                    if (ev == null || needsRelocationFixup(id)) {
                         curSec.fixups.add(new AssemblerFixup(
                                 id, curSec.ip, v.bits, shift, oplen, n, this.linenum,
-                                v.iprel, v.ipofs, v.ipmul == 0 ? 1 : v.ipmul, v.endian
+                                v.iprel, v.ipofs, v.ipmul == 0 ? 1 : v.ipmul, v.endian,
+                                this.currentSourceName, this.currentCol, this.currentInstrText
                         ));
                         xl = 0;
                     } else {
@@ -1699,7 +1712,7 @@ public class Assembler {
             }
 
             if (pl.label != null) {
-                this.symbols.put(pl.label.toLowerCase(Locale.ROOT), new Symbol(curSec.ip));
+                this.symbols.put(pl.label.toLowerCase(Locale.ROOT), new Symbol(curSec.ip, curSec.name));
             }
 
             if (pl.directiveTokens != null) {
@@ -1746,7 +1759,9 @@ public class Assembler {
         for (AssemblerRule rule : this.spec.rules) {
             Matcher m = rule.re.matcher(normalizedLower);
             if (m.matches()) {
+                this.currentInstrText = normalizedLower;
                 AssemblerLineResult result = this.buildInstruction(rule, m);
+                this.currentInstrText = null;
                 if (!(result instanceof AssemblerErrorResult)) {
                     this.addBytes((AssemblerInstruction) result);
                     return (AssemblerInstruction) result;
@@ -1773,7 +1788,8 @@ public class Assembler {
         long max = mask64(fix.size);
         long min = signedMin(fix.size);
         if (fix.size < 64 && (value < min || value > max)) {
-            warning("Value " + value + " does not fit in " + fix.size + " bits", fix.line);
+            String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
+            warningAt("Value " + value + " does not fit in " + fix.size + " bits" + extra, fix.line, fix.col, fix.source);
         }
         value &= max;
 
@@ -1794,7 +1810,8 @@ public class Assembler {
 
             int outIndex = dstWord - sec.origin;
             if (outIndex < 0) {
-                warning("Fixup for '" + fix.sym + "' writes before section origin (" + sec.name + ")", fix.line);
+                String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
+                warningAt("Fixup for '" + fix.sym + "' writes before section origin (" + sec.name + ")" + extra, fix.line, fix.col, fix.source);
                 return;
             }
             while (outIndex >= sec.outwords.size()) sec.outwords.add(0);
@@ -1827,31 +1844,23 @@ public class Assembler {
             return state();
         }
 
-        // Resolve fixups per section
+        // ------------------------------------------------------------
+        // 1) Decide deterministic output section order (flat binary)
+        // ------------------------------------------------------------
+        List<String> order = new ArrayList<>();
+        if (sections.containsKey(".text")) order.add(".text");
+        if (sections.containsKey(".data")) order.add(".data");
+        for (String k : sections.keySet()) {
+            if (k.equals(".bss")) continue;
+            if (order.contains(k)) continue;
+            order.add(k);
+        }
+
+        // ------------------------------------------------------------
+        // 2) Apply per-section .len padding BEFORE layout/fixups
+        // ------------------------------------------------------------
         for (SectionState sec : sections.values()) {
-            if (sec.bss) {
-                sec.fixups.clear();
-                continue;
-            }
-
-            for (AssemblerFixup fix : sec.fixups) {
-                Long ev;
-                try {
-                    ev = evalExprAllowLocals(fix.sym, fix.ofs);
-                } catch (IllegalArgumentException ex) {
-                    warning("Bad fixup expr '" + fix.sym + "': " + ex.getMessage());
-                    ev = null;
-                }
-
-                if (ev == null) {
-                    warning("Unresolved symbol/expression '" + fix.sym + "'");
-                } else {
-                    applyFixup(sec, fix, ev);
-                }
-            }
-            sec.fixups.clear();
-
-            // Per-section .len padding
+            if (sec == null || sec.bss) continue;
             if (sec.codelen > 0) {
                 while (sec.outwords.size() < sec.codelen) {
                     sec.outwords.add(0);
@@ -1859,7 +1868,91 @@ public class Assembler {
             }
         }
 
-        // Fill listing bytes (insns) for each source line, using that line's section
+        // ------------------------------------------------------------
+        // 3) Compute flat start offsets for each section (words)
+        // ------------------------------------------------------------
+        final Map<String, Integer> flatStartWordsBySec = new LinkedHashMap<>();
+        int flatOfsWords = 0;
+        for (String secName : order) {
+            SectionState sec = sections.get(secName);
+            if (sec == null || sec.bss) continue;
+            flatStartWordsBySec.put(secName, flatOfsWords);
+            flatOfsWords += sec.outwords.size();
+        }
+
+        // ------------------------------------------------------------
+        // 4) Build relocated symbol table: symbols become flat addresses
+        // ------------------------------------------------------------
+        final Map<String, Symbol> symbolsAbs = new HashMap<>();
+        for (var e : symbols.entrySet()) {
+            String name = e.getKey();
+            Symbol s = e.getValue();
+            if (s == null) continue;
+
+            // absolute symbols (.equ/.define) stay absolute
+            if (s.section == null) {
+                symbolsAbs.put(name, new Symbol(s.value));
+                continue;
+            }
+
+            SectionState sec = sections.get(s.section);
+            Integer flatStart = flatStartWordsBySec.get(s.section);
+            if (sec == null || flatStart == null) {
+                warning("Symbol '" + name + "' refers to missing section " + s.section);
+                symbolsAbs.put(name, new Symbol(s.value));
+                continue;
+            }
+
+            int abs = flatStart + (s.value - sec.origin);
+            symbolsAbs.put(name, new Symbol(abs));
+        }
+
+        // ------------------------------------------------------------
+        // 5) Resolve fixups using relocated symbols + relocated dot (.)
+        // ------------------------------------------------------------
+        for (SectionState sec : sections.values()) {
+            if (sec == null) continue;
+
+            if (sec.bss) {
+                sec.fixups.clear();
+                continue;
+            }
+
+            int flatStart = flatStartWordsBySec.getOrDefault(sec.name, 0);
+            int baseWords = flatStart - sec.origin; // converts section addresses -> flat addresses
+
+            for (AssemblerFixup fix : sec.fixups) {
+                Long ev;
+                try {
+                    // dotLocal = fix.ofs (section address space)
+                    // dotAbs   = fix.ofs + baseWords (flat address space)
+                    ev = evalExprAllowLocals(fix.sym, fix.ofs, fix.ofs + baseWords, baseWords, symbolsAbs);
+                } catch (IllegalArgumentException ex) {
+                    String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
+                    warningAt("Bad fixup expr '" + fix.sym + "': " + ex.getMessage() + extra, fix.line, fix.col, fix.source);
+                    ev = null;
+                }
+
+                if (ev == null) {
+                    String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
+                    warningAt("Unresolved symbol/expression '" + fix.sym + "'" + extra, fix.line, fix.col, fix.source);
+                } else {
+                    long v = ev;
+                    // Fixup expressions are evaluated in *absolute* (flat) word addresses.
+                    // applyFixup()'s ip-relative logic uses fix.ofs (section-local), so for iprel
+                    // we convert the target back into the current section's local coordinate space.
+                    if (fix.iprel) {
+                        v -= baseWords;
+                    }
+                    applyFixup(sec, fix, v);
+                }
+            }
+            sec.fixups.clear();
+        }
+
+        // ------------------------------------------------------------
+        // 6) Fill listing bytes (insns) per source line
+        // ------------------------------------------------------------
         int digits = (int) Math.ceil(this.width / 4.0);
         for (AssemblerLine al : this.asmlines) {
             SectionState sec = sections.get(al.section);
@@ -1882,20 +1975,12 @@ public class Assembler {
             al.insns = sb.toString();
         }
 
-        // Build flat binary by concatenating sections in deterministic order:
-        // .text, then .data, then any other progbits sections in insertion order. (.bss does not emit bytes.)
-        List<String> order = new ArrayList<>();
-        if (sections.containsKey(".text")) order.add(".text");
-        if (sections.containsKey(".data")) order.add(".data");
-        for (String k : sections.keySet()) {
-            if (k.equals(".bss")) continue;
-            if (order.contains(k)) continue;
-            order.add(k);
-        }
-
+        // ------------------------------------------------------------
+        // 7) Build flat binary output + metadata
+        // ------------------------------------------------------------
         final Map<String, Object> secMeta = new LinkedHashMap<>();
         final List<Integer> flat = new ArrayList<>();
-        int flatOfsWords = 0;
+        int outOfsWords = 0;
 
         for (String secName : order) {
             SectionState sec = sections.get(secName);
@@ -1907,12 +1992,12 @@ public class Assembler {
             m.put("origin_bytes", wordsToBytes(sec.origin));
             m.put("size_words", sec.outwords.size());
             m.put("size_bytes", wordsToBytes(sec.outwords.size()));
-            m.put("flat_start_words", flatOfsWords);
-            m.put("flat_start_bytes", wordsToBytes(flatOfsWords));
+            m.put("flat_start_words", outOfsWords);
+            m.put("flat_start_bytes", wordsToBytes(outOfsWords));
             secMeta.put(secName, m);
 
             flat.addAll(sec.outwords);
-            flatOfsWords += sec.outwords.size();
+            outOfsWords += sec.outwords.size();
         }
 
         // Record BSS metadata too (no bytes emitted)
@@ -2345,10 +2430,32 @@ public class Assembler {
         return out.toString();
     }
 
+    // ----------------------------------------------------------------------
+    // Step 13 helpers: local labels (.Lfoo) and numeric locals (1f / 1b)
+    // ----------------------------------------------------------------------
 
-// ----------------------------------------------------------------------
-// Step 13 helpers: local labels (.Lfoo) and numeric locals (1f / 1b)
-// ----------------------------------------------------------------------
+    // Returns true if expr should be deferred to finish() because its value depends on layout/relocation.
+    // We consider:
+    //  - '.' location counter (changes when section is relocated)
+    //  - any identifier that is a symbol (even same section!) because section may have non-zero flatStart
+    private boolean needsRelocationFixup(String expr) {
+        if (expr == null) return false;
+        String e = expr.trim();
+        if (e.isEmpty()) return false;
+
+        // dot always relocation-sensitive for flat layout
+        if (e.indexOf('.') >= 0) return true;
+
+        // If any identifier in the expression matches a symbol name -> relocation sensitive
+        Matcher m = IDENT_PATTERN.matcher(e);
+        while (m.find()) {
+            String id = m.group();
+            // skip hex prefix confusion: IDENT_PATTERN won't match "0x" anyway, but keep safe
+            Symbol s = symbols.get(id.toLowerCase(Locale.ROOT));
+            if (s != null) return true;
+        }
+        return false;
+    }
 
     /**
      * Rewrites GAS-style dot-local labels (e.g. ".Lloop") to a grammar-legal form ("_Lloop").
@@ -2470,6 +2577,42 @@ public class Assembler {
         e = sb.toString();
 
         return ExpressionEvaluator.eval(e, symbols, dot);
+    }
+
+    private Long evalExprAllowLocals(String expr, int dotLocal, int dotAbs, int baseWords, Map<String, Symbol> symtab) {
+        if (expr == null) return null;
+        String e = expr.trim();
+        if (e.isEmpty()) return 0L;
+
+        e = DOT_LOCAL_PATTERN.matcher(e).replaceAll("_L$1");
+
+        // numeric locals: compare using dotLocal (section-local),
+        // but *replace* with absolute target = local + baseWords
+        Matcher m2 = NUM_REF_REWRITTEN_PATTERN.matcher(e);
+        StringBuffer sb2 = new StringBuffer();
+        while (m2.find()) {
+            int n = Integer.parseInt(m2.group(1));
+            char dir = Character.toLowerCase(m2.group(2).charAt(0));
+            Integer target = resolveNumericRef(n, dir, dotLocal);
+            if (target == null) return null;
+            m2.appendReplacement(sb2, Matcher.quoteReplacement(Integer.toString(target + baseWords)));
+        }
+        m2.appendTail(sb2);
+        e = sb2.toString();
+
+        Matcher m = NUM_REF_PATTERN.matcher(e);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            int n = Integer.parseInt(m.group(1));
+            char dir = Character.toLowerCase(m.group(2).charAt(0));
+            Integer target = resolveNumericRef(n, dir, dotLocal);
+            if (target == null) return null;
+            m.appendReplacement(sb, Matcher.quoteReplacement(Integer.toString(target + baseWords)));
+        }
+        m.appendTail(sb);
+        e = sb.toString();
+
+        return ExpressionEvaluator.eval(e, symtab, dotAbs);
     }
 
     static final class CollectingErrorListener extends BaseErrorListener {

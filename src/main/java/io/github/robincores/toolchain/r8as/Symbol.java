@@ -1,17 +1,23 @@
 package io.github.robincores.toolchain.r8as;
 
 public class Symbol {
-  public int value;
+    final int value;          // word address at definition time (ip)
+    final String section;     // e.g. ".text", ".data" ; null => absolute
 
-  // Constructor
-  public Symbol(int value) {
-    this.value = value;
-  }
+    Symbol(int value) {
+        this(value, null);
+    }
 
-  @Override
-  public String toString() {
-    return "Symbol{" +
-        "value=" + value +
-        '}';
-  }
+    Symbol(int value, String section) {
+        this.value = value;
+        this.section = section;
+    }
+
+    @Override
+    public String toString() {
+        return "Symbol{" +
+                "value=" + value +
+                ", section='" + section + '\'' +
+                '}';
+    }
 }
