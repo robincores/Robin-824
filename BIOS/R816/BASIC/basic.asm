@@ -266,6 +266,21 @@ basic_exec_line:
   bra .Lbasic_done
 
 .Lbasic_empty:
+  ; Empty line handling:
+  ; - If we were already showing READY (SYS_PROMPT=1), suppress repeated READY spam.
+  ; - If we were in silent mode (SYS_PROMPT=0, e.g. during program entry), re-enable READY.
+  i SYS_PROMPT
+  lu
+  i0
+  beq .Lbasic_empty_was_silent
+
+  ; was READY -> go silent for one cycle
+  i SYS_PROMPT
+  i0
+  sb
+  bra .Lbasic_done
+
+.Lbasic_empty_was_silent:
   i SYS_PROMPT
   i1
   sb
