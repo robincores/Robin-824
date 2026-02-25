@@ -146,11 +146,11 @@ basic_exec_line:
 
   CALL tok_skip_spaces
 
-  ; empty -> prompt on, return
+  ; empty -> suppress READY, return
   ldl w10
   lu
   i0
-  beq .Lbasic_empty
+  beqfar .Lbasic_blank
 
   ; If we are RUNNING, NEVER treat leading digits as "program entry".
   i SYS_RUNNING
@@ -194,13 +194,13 @@ basic_exec_line:
   ldl w10
   stl w1
   CALL prog_store_line
-  bra .Lbasic_done
+  brafar .Lbasic_done
 
 .Lbasic_delete_line:
   ldl w2
   stl w0
   CALL prog_delete_line
-  bra .Lbasic_done
+  brafar .Lbasic_done
 
   ; ---------------- immediate/direct mode ----------------
 .Lbasic_immediate:
@@ -211,7 +211,7 @@ basic_exec_line:
   CALL stmt_try_end
   ldl w0
   i1
-  beq .Lbasic_done
+  beqfar .Lbasic_done
 
   CALL stmt_try_goto
   ldl w0
@@ -265,25 +265,19 @@ basic_exec_line:
   CALL bios_crlf
   bra .Lbasic_done
 
-.Lbasic_empty:
-  ; Empty line handling:
-  ; - If we were already showing READY (SYS_PROMPT=1), suppress repeated READY spam.
-  ; - If we were in silent mode (SYS_PROMPT=0, e.g. during program entry), re-enable READY.
-  i SYS_PROMPT
+.Lbasic_blank:
+  ; Blank line in REPL: do not spam READY. next loop
+  ; If we're RUNNING, leave SYS_PROMPT untouched.
+  i SYS_RUNNING
   lu
   i0
-  beq .Lbasic_empty_was_silent
+  bne .Lbasic_done
 
-  ; was READY -> go silent for one cycle
+  ; suppress READY after blank enter
   i SYS_PROMPT
   i0
   sb
   bra .Lbasic_done
-
-.Lbasic_empty_was_silent:
-  i SYS_PROMPT
-  i1
-  sb
 
 .Lbasic_done:
   ldl w14
