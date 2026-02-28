@@ -2,8 +2,8 @@
 ; Requires: csrr/csrw in r816.json
 ; Contract: uses w0..w3 args, returns in w0
 
-;.include "BIOS/R816/ports.inc"
-;.include "BIOS/R816/bios.inc"
+;.include "ROBIN-16/BIOS/ports.inc"
+;.include "ROBIN-16/BIOS/bios.inc"
 
 bios_trap:
   ; --- return to instruction AFTER ECALL ---

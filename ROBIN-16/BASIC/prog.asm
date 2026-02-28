@@ -242,7 +242,7 @@ prog_store_line:
   ldl w8
   lu
   i0
-  beq .Lps_done
+  beqfar .Lps_done
 
   ldl w7
   stl w0
@@ -471,6 +471,16 @@ prog_run:
   u 0
   sb
 
+  i SYS_RET_PEND
+  u 0
+  sb
+  i SYS_FOR_SP
+  u 0
+  sb
+  i SYS_GOSUB_SP
+  u 0
+  sb
+
   CALL prog_get_top
   ldl w0
   stl w11
@@ -546,7 +556,7 @@ prog_run_loop:
   ldl w10
   ldl w11
   bltu .Lrl_body
-  bra .Lrl_exit
+  brafar .Lrl_exit
 
 .Lrl_body:
   ; Clear per-line control flags (defensive against stale state)
@@ -597,51 +607,6 @@ prog_run_loop:
   i0
   bne .Lrl_after_exec
 
-          ; store current line number bytes (lo + hi7) for error reporting / GOSUB
-          ldl w10
-          lu
-          stl w1
-          ldl w2
-          u 0x7F
-          and
-          stl w3
-          i SYS_CUR_LINE_LO
-          ldl w1
-          sb
-          i SYS_CUR_LINE_HI
-          ldl w3
-          sb
-
-          ; store next line number bytes (or 0 if end)
-          ldl w13
-          ldl w11
-          bltu .Lrl_has_next_line
-          i SYS_NEXT_LINE_LO
-          u 0
-          sb
-          i SYS_NEXT_LINE_HI
-          u 0
-          sb
-          bra .Lrl_next_line_done
-.Lrl_has_next_line:
-          ldl w13
-          lu
-          stl w4
-          ldl w13
-          i1
-          add
-          lu
-          u 0x7F
-          and
-          stl w5
-          i SYS_NEXT_LINE_LO
-          ldl w4
-          sb
-          i SYS_NEXT_LINE_HI
-          ldl w5
-          sb
-.Lrl_next_line_done:
-
   ; exec at ptr+3
   ; preserve top and nextPtr across basic_exec_line (it clobbers w11/w13)
   ldl w11
@@ -661,6 +626,33 @@ prog_run_loop:
   stl w11
 
 .Lrl_after_exec:
+  ; RETURN pending? (jump to stored record pointer)
+  i SYS_RET_PEND
+  lu
+  i0
+  beq .Lrl_check_end
+
+  i SYS_RET_PEND
+  u 0
+  sb
+
+  i SYS_RET_PTR_LO
+  lu
+  stl w1
+  i SYS_RET_PTR_HI
+  lu
+  stl w2
+
+  ; retPtr = (hi<<8) | lo
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w10
+  bra .Lrl_loop
+
+.Lrl_check_end:
   ; END?
   i SYS_END_PEND
   lu

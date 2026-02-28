@@ -8,8 +8,8 @@
 .arch r816
 .width 8
 
-.include "BIOS/R816/ports.inc"
-.include "BIOS/R816/macros.inc"
+.include "ROBIN-16/BIOS/ports.inc"
+.include "ROBIN-16/BIOS/macros.inc"
 
 ; ---------------- BASIC memory ----------------
 .equ LINE_BUF     0x9100
@@ -26,16 +26,22 @@
 .equ SYS_GOTO_PEND  0x9006      ; 1 byte
 .equ SYS_END_PEND   0x9007      ; 1 byte
 
-; Per-RUN context (set by prog_run_loop)
-.equ SYS_CUR_LINE_LO 0x9008      ; current executing line (lo)
-.equ SYS_CUR_LINE_HI 0x9009      ; current executing line (hi7)
-.equ SYS_NEXT_LINE_LO 0x900A     ; line number after current (lo) for RETURN
-.equ SYS_NEXT_LINE_HI 0x900B     ; line number after current (hi7) for RETURN
+; RUN context helpers (set by prog_run_loop)
+.equ SYS_NEXT_PTR_LO 0x9008      ; next record pointer (lo)
+.equ SYS_NEXT_PTR_HI 0x9009      ; next record pointer (hi)
+.equ SYS_RET_PTR_LO  0x900A      ; return/loop target record pointer (lo)
+.equ SYS_RET_PTR_HI  0x900B      ; return/loop target record pointer (hi)
+.equ SYS_RET_PEND    0x900C      ; 1 byte: 1 => jump to SYS_RET_PTR*
 
 ; GOSUB/RETURN stack
-.equ SYS_GOSUB_SP   0x900C       ; depth (0..GOSUB_STACK_MAX)
-.equ GOSUB_STACK_BASE 0x91E0     ; 16 * 2 bytes = 32 bytes (fits before VAR_BASE)
+.equ SYS_GOSUB_SP    0x900D      ; 0..GOSUB_STACK_MAX
+.equ GOSUB_STACK_BASE 0x91E0     ; 16 * 2 bytes
 .equ GOSUB_STACK_MAX  16
+
+; FOR/NEXT stack
+.equ SYS_FOR_SP      0x900E      ; 0..FOR_STACK_MAX
+.equ FOR_STACK_BASE   0x9A80     ; right after VAR table
+.equ FOR_STACK_MAX    16         ; frames of 8 bytes
 
 .equ PROG_BASE      0xA000
 .equ PROG_LIMIT     0xBE00      ; first forbidden address
@@ -72,7 +78,13 @@ start:
   u 0
   sb
 
+  i SYS_RET_PEND
+  u 0
+  sb
   i SYS_GOSUB_SP
+  u 0
+  sb
+  i SYS_FOR_SP
   u 0
   sb
 
@@ -165,7 +177,7 @@ basic_exec_line:
   ldl w10
   lu
   i0
-  beq .Lbasic_empty
+  beqfar .Lbasic_empty
 
   ; If we are RUNNING, NEVER treat leading digits as "program entry".
   i SYS_RUNNING
@@ -192,7 +204,7 @@ basic_exec_line:
 
   ; program entry: suppress READY between lines
   i SYS_PROMPT
-  i0
+  u 0
   sb
 
   CALL tok_skip_spaces
@@ -209,89 +221,136 @@ basic_exec_line:
   ldl w10
   stl w1
   CALL prog_store_line
-  bra .Lbasic_done
+  brafar .Lbasic_done
 
 .Lbasic_delete_line:
   ldl w2
   stl w0
   CALL prog_delete_line
-  bra .Lbasic_done
+  brafar .Lbasic_done
 
   ; ---------------- immediate/direct mode ----------------
 .Lbasic_immediate:
-  i SYS_PROMPT
-  i1
-  sb
+i SYS_PROMPT
+u 1
+sb
 
-  CALL stmt_try_end
-  ldl w0
-  i1
-  beq .Lbasic_done
+; Save start-of-statement pointer (protect against partial keyword consumption)
+ldl w10
+stl w8
 
-  CALL stmt_try_goto
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_end
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_new
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_goto
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_list
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_gosub
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_run
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_return
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_cls
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_new
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_help
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_list
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_if
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_run
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_rem
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_cls
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_input
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_help
+ldl w0
+i1
+beqfar .Lbasic_done
 
-  CALL stmt_try_gosub
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_if
+ldl w0
+i1
+beq .Lbasic_done
 
-  CALL stmt_try_return
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_for
+ldl w0
+i1
+beq .Lbasic_done
 
-  CALL stmt_try_let
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_next
+ldl w0
+i1
+beq .Lbasic_done
 
-  CALL stmt_try_print
-  ldl w0
-  i1
-  beq .Lbasic_done
+ldl w8
+stl w10
+CALL stmt_try_input
+ldl w0
+i1
+beq .Lbasic_done
+
+ldl w8
+stl w10
+CALL stmt_try_let
+ldl w0
+i1
+beq .Lbasic_done
+
+ldl w8
+stl w10
+CALL stmt_try_print
+ldl w0
+i1
+beq .Lbasic_done
+
+ldl w8
+stl w10
+CALL stmt_try_rem
+ldl w0
+i1
+beq .Lbasic_done
+
 
   ; unknown
 i err_syntax
@@ -305,13 +364,14 @@ lu
 i0
 beq .Lbasic_done
 i SYS_END_PEND
-i1
+u 1
 sb
 bra .Lbasic_done
 
+
 .Lbasic_empty:
   i SYS_PROMPT
-  i1
+  u 1
   sb
 
 .Lbasic_done:
@@ -331,10 +391,10 @@ err_syntax:
   .byte 0
 
 ; includes at end
-.include "BIOS/R816/con.asm"
-.include "BIOS/R816/kbd.asm"
-.include "BIOS/R816/BASIC/tok.asm"
-.include "BIOS/R816/BASIC/vars.asm"
-.include "BIOS/R816/BASIC/expr.asm"
-.include "BIOS/R816/BASIC/stmt.asm"
-.include "BIOS/R816/BASIC/prog.asm"
+.include "ROBIN-16/BIOS/con.asm"
+.include "ROBIN-16/BIOS/kbd.asm"
+.include "ROBIN-16/BASIC/tok.asm"
+.include "ROBIN-16/BASIC/vars.asm"
+.include "ROBIN-16/BASIC/expr.asm"
+.include "ROBIN-16/BASIC/stmt.asm"
+.include "ROBIN-16/BASIC/prog.asm"

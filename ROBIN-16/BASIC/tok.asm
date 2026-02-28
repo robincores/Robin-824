@@ -296,3 +296,23 @@ tok_read_ident:
   stl w1
   ldl w14
   jr
+
+
+; ------------------------------------------------------------
+; tok_skip_to_eol()
+; Advances w10 until NUL (0) encountered (consumes rest of line).
+; ------------------------------------------------------------
+tok_skip_to_eol:
+  stl w14
+.Lte_loop:
+  ldl w10
+  lu
+  i0
+  beq .Lte_done
+  ldl w10
+  inc
+  stl w10
+  bra .Lte_loop
+.Lte_done:
+  ldl w14
+  jr

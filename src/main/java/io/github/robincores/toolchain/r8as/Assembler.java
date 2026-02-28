@@ -80,6 +80,7 @@ public class Assembler {
 
     private static final Pattern DOT_LOCAL_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])\\.L([A-Za-z_][A-Za-z0-9_]*)");
     private static final Pattern NUM_LABEL_DEF_PATTERN = Pattern.compile("^\\s*([0-9]+):");
+    private static final Pattern LABEL_DEF_PATTERN = Pattern.compile("^\\s*([A-Za-z_][A-Za-z0-9_]*):");
     private static final Pattern NUM_REF_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])([0-9]+)([fb])(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
     private static final Pattern NUM_REF_REWRITTEN_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])__L([0-9]+)([fb])(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
     List<AssemblerError> errors = new ArrayList<>();
@@ -118,6 +119,187 @@ public class Assembler {
     private final Deque<String> macroExpansionStack = new ArrayDeque<>();
     private static final int MAX_MACRO_EXPANSION_DEPTH = 64;
 
+    // ----- Conditional compilation (.if/.ifdef/.else/.endif) -----
+    private static final class IfFrame {
+        final boolean parentActive;
+        boolean active;
+        boolean branchTaken;
+        boolean elseSeen;
+
+        final String openedBy;
+        final String source;
+        final int line;
+
+        IfFrame(boolean parentActive, boolean active, String openedBy, String source, int line) {
+            this.parentActive = parentActive;
+            this.active = active;
+            this.branchTaken = active;
+            this.elseSeen = false;
+            this.openedBy = openedBy;
+            this.source = source;
+            this.line = line;
+        }
+    }
+
+    private final Deque<IfFrame> ifStack = new ArrayDeque<>();
+    private String currentArchDefineKey = null;
+
+    private boolean ccActive() {
+        return ifStack.isEmpty() || ifStack.peek().active;
+    }
+
+    private static boolean isCcDirective(String cmd) {
+        return cmd.equals(".if") || cmd.equals(".ifdef") || cmd.equals(".ifndef")
+                || cmd.equals(".elif") || cmd.equals(".elseif")
+                || cmd.equals(".else") || cmd.equals(".endif");
+    }
+
+    private static String firstWord(String s) {
+        if (s == null) return "";
+        String t = s.trim();
+        if (t.isEmpty()) return "";
+        int i = 0;
+        while (i < t.length() && t.charAt(i) != ' ' && t.charAt(i) != '\t') i++;
+        return t.substring(0, i).trim();
+    }
+
+    private boolean evalCondExpr(String expr, String ctxName) {
+        if (expr == null || expr.isBlank()) {
+            fatal("Missing expression for " + ctxName);
+            return false;
+        }
+        Long ev;
+        try {
+            ev = evalExprAllowLocals(expr, curSec.ip);
+        } catch (IllegalArgumentException ex) {
+            fatal("Bad expression in " + ctxName + ": " + ex.getMessage());
+            return false;
+        }
+        if (ev == null) {
+            fatal("Unresolved symbol/expression '" + expr + "' in " + ctxName);
+            return false;
+        }
+        return ev != 0;
+    }
+
+    private void handleCcDirective(String cmd, String rest) {
+        cmd = cmd.toLowerCase(Locale.ROOT);
+
+        switch (cmd) {
+            case ".if": {
+                boolean parent = ccActive();
+                boolean cond = parent && evalCondExpr(rest, ".if");
+                ifStack.push(new IfFrame(parent, cond, ".if", currentSourceName, linenum));
+                return;
+            }
+            case ".ifdef": {
+                boolean parent = ccActive();
+                String name = firstWord(rest).toLowerCase(Locale.ROOT);
+                if (name.isEmpty()) { fatal("Usage: .ifdef NAME"); return; }
+                boolean cond = parent && symbols.containsKey(name);
+                ifStack.push(new IfFrame(parent, cond, ".ifdef", currentSourceName, linenum));
+                return;
+            }
+            case ".ifndef": {
+                boolean parent = ccActive();
+                String name = firstWord(rest).toLowerCase(Locale.ROOT);
+                if (name.isEmpty()) { fatal("Usage: .ifndef NAME"); return; }
+                boolean cond = parent && !symbols.containsKey(name);
+                ifStack.push(new IfFrame(parent, cond, ".ifndef", currentSourceName, linenum));
+                return;
+            }
+            case ".elif":
+            case ".elseif": {
+                IfFrame f = ifStack.peek();
+                if (f == null) { fatal(cmd + " without matching .if"); return; }
+                if (f.elseSeen) { fatal(cmd + " after .else is not allowed"); return; }
+
+                if (!f.parentActive) { f.active = false; return; }
+                if (f.branchTaken) { f.active = false; return; }
+
+                boolean cond = evalCondExpr(rest, cmd);
+                f.active = cond;
+                if (cond) f.branchTaken = true;
+                return;
+            }
+            case ".else": {
+                IfFrame f = ifStack.peek();
+                if (f == null) { fatal(".else without matching .if"); return; }
+                if (f.elseSeen) { fatal("Duplicate .else"); return; }
+                f.elseSeen = true;
+
+                if (!f.parentActive) { f.active = false; f.branchTaken = true; return; }
+                f.active = !f.branchTaken;
+                f.branchTaken = true;
+                return;
+            }
+            case ".endif": {
+                IfFrame f = ifStack.peek();
+                if (f == null) { fatal(".endif without matching .if"); return; }
+                ifStack.pop();
+                return;
+            }
+            default:
+                // not cc
+        }
+    }
+
+    /**
+     * Returns true if:
+     *  - line is a cc directive and was handled, OR
+     *  - line is inside an inactive block and must be skipped.
+     *
+     * IMPORTANT: must run BEFORE numeric label/normal label recording.
+     */
+    private boolean handleCcOrSkip(String noCommentLine) {
+        if (noCommentLine == null) return false;
+
+        String scan = noCommentLine;
+
+        // strip numeric label "1:" for directive detection
+        Matcher nm = NUM_LABEL_DEF_PATTERN.matcher(scan);
+        if (nm.find()) {
+            scan = scan.substring(nm.end()).stripLeading();
+        } else {
+            // strip normal label "foo:" for directive detection
+            Matcher lm = LABEL_DEF_PATTERN.matcher(scan);
+            if (lm.find()) {
+                scan = scan.substring(lm.end()).stripLeading();
+            }
+        }
+
+        String t = scan.stripLeading();
+        if (t.startsWith(".")) {
+            // cmd is ".<ident>" even if followed by '(' or no whitespace
+            Matcher dm = Pattern.compile("^\\.[A-Za-z_][A-Za-z0-9_]*").matcher(t);
+            if (dm.find()) {
+                String cmd = dm.group().toLowerCase(Locale.ROOT);
+                String rest = t.substring(dm.end()).trim();
+
+                if (isCcDirective(cmd)) {
+                    handleCcDirective(cmd, rest);
+                    return true; // handled directive
+                }
+            }
+        }
+
+        // not a cc directive; skip if inactive
+        return !ccActive();
+    }
+
+    private void updateWidthDefine() {
+        symbols.put("__width__".toLowerCase(Locale.ROOT), new Symbol(width));
+    }
+
+    private void updateArchDefine(String archRaw) {
+        String a = (archRaw == null) ? "" : archRaw.trim().toLowerCase(Locale.ROOT);
+        a = a.replaceAll("[^a-z0-9]+", "_");
+        if (a.isEmpty()) return;
+
+        if (currentArchDefineKey != null) symbols.remove(currentArchDefineKey);
+        currentArchDefineKey = ("__arch_" + a + "__").toLowerCase(Locale.ROOT);
+        symbols.put(currentArchDefineKey, new Symbol(1));
+    }
 
     // Better diagnostics (source + column)
     private String currentSourceName = "<input>";
@@ -147,6 +329,7 @@ public class Assembler {
         // Seed with default section for deterministic output ordering.
         // (If the user never mentions sections, behavior matches legacy single-section assembly.)
         switchSection(".text", false);
+        updateWidthDefine();
     }
 
     private static String normalizeSectionName(String raw) {
@@ -1175,6 +1358,15 @@ public class Assembler {
                 break;
             }
 
+            case ".undef": {
+                if (tokens.length < 2) {
+                    fatal("Usage: .undef NAME");
+                    break;
+                }
+                symbols.remove(tokens[1].toLowerCase(Locale.ROOT));
+                break;
+            }
+
             case ".macro": {
                 if (tokens.length < 2) {
                     fatal(".macro requires a name");
@@ -1230,6 +1422,7 @@ public class Assembler {
                 if (!(width == 8 || width == 16 || width == 24 || width == 32)) {
                     fatal("Unsupported .width " + width + " (use 8,16,24,32)");
                 }
+                updateWidthDefine();
                 break;
             }
 
@@ -1238,7 +1431,12 @@ public class Assembler {
                     fatal("Usage: .arch name");
                     break;
                 }
-                fatalIf(loadArch(tokens[1]));
+                String err = loadArch(tokens[1]);
+                fatalIf(err);
+                if (err == null && !aborted) {
+                    updateArchDefine(tokens[1]);
+                    updateWidthDefine(); // arch may change width via spec.width
+                }
                 break;
             }
 
@@ -1710,6 +1908,8 @@ public class Assembler {
             return null;
         }
 
+        // Step 16: conditional compilation gate (must run BEFORE numeric-label recording)
+        if (handleCcOrSkip(noComment)) return null;
 
         // Step 13: numeric local label def (e.g., 1:)
         var nm = NUM_LABEL_DEF_PATTERN.matcher(noComment);
@@ -1864,6 +2064,12 @@ public class Assembler {
     }
 
     public AssemblerState finish() {
+        if (!ifStack.isEmpty() && !aborted) {
+            IfFrame outer = ifStack.peekLast(); // oldest unterminated
+            fatalAt("Unterminated " + outer.openedBy + " (missing .endif)", outer.line, 1, outer.source);
+            ifStack.clear();
+        }
+
         if (aborted) {
             return state();
         }
