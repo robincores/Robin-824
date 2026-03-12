@@ -1,3 +1,5 @@
+.once
+
 ; BIOS/R816/macros.inc
 ; Generic helper macros used by BIOS and apps
 
@@ -5,6 +7,15 @@
   i \addr
   u \val
   sb
+.endm
+
+; Tiny immediates used all over BASIC/BIOS sources
+.macro i0
+  i 0
+.endm
+
+.macro i1
+  i 1
 .endm
 
 ; CALL target
@@ -20,8 +31,6 @@
 ; ------------------------------------------------------------
 ; bgt target  (macro shim)
 ; Branch if (B > A), using existing bge + beq + bra
-;
-; Implementation: if (B >= A) and (B != A) => B > A
 ; ------------------------------------------------------------
 .macro bgt target
   bge .Lbgt_ge_\@
@@ -36,9 +45,7 @@
 
 ; ------------------------------------------------------------
 ; FAR branch shims (use rel16 J internally)
-; Use when a rel8 branch overflows (e.g., -131).
 ; ------------------------------------------------------------
-
 .macro brafar target
   j \target
 .endm
@@ -77,4 +84,35 @@
   bltu 1f
   j \target
 1:
+.endm
+
+; ------------------------------------------------------------------
+; Compatibility pseudos still used by current BASIC/BIOS sources.
+; Keep these until the sources are fully migrated.
+; ------------------------------------------------------------------
+
+; Old 'mod' mnemonic -> canonical 'rem' (signed remainder)
+.macro mod
+  rem
+.endm
+
+; Old constant shifts -> immediate + variable shift
+.macro sll n
+  u \n
+  shl
+.endm
+
+.macro srl n
+  u \n
+  shr
+.endm
+
+.macro sra n
+  u \n
+  sar
+.endm
+
+; Legacy 'jsr label' -> CALL label (saves/restores w14)
+.macro jsr target
+  CALL \target
 .endm

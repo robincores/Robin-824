@@ -1,5 +1,7 @@
 package io.github.robincores.r8.device;
 
+import java.util.concurrent.locks.LockSupport;
+
 import static java.lang.Math.*;
 
 /**
@@ -64,7 +66,7 @@ public final class ApuAudioDemo {
     private static final int EN_PCM0 = 1 << 4;
 
     // Demo pacing
-    private static final long CPU_HZ = 12_500_000L;
+    private static final long CPU_HZ = 12_572_000L;
 
     public static void main(String[] args) throws Exception {
         // RAM big enough for sample addresses used here.
@@ -132,10 +134,20 @@ public final class ApuAudioDemo {
     private static void playForSeconds(APU apu, double seconds) {
         long totalCycles = (long) (CPU_HZ * seconds);
         int chunk = 10_000;
+
+        long startNs = System.nanoTime();
         long done = 0;
+
         while (done < totalCycles) {
             apu.tick(chunk);
             done += chunk;
+
+            // Wall-clock pacing: target time for 'done' cycles
+            long targetNs = startNs + (done * 1_000_000_000L) / CPU_HZ;
+            long sleepNs = targetNs - System.nanoTime();
+            if (sleepNs > 0) {
+                LockSupport.parkNanos(sleepNs);
+            }
         }
     }
 

@@ -15,13 +15,13 @@ public class AssemblerState {
   List<AssemblerFixup> fixups; // List of unresolved symbols and addresses to fix up later
 
   // inside AssemblerState
-  public java.util.List<AssemblerError> getErrors() { return errors; }
-  public java.util.List<Integer> getOutput() { return output; }
+  public List<AssemblerError> getErrors() { return errors; }
+  public List<Integer> getOutput() { return output; }
 
   // optional, nice-to-have:
   public Object getIntermediate() { return intermediate; }
-  public java.util.List<AssemblerLine> getLines() { return lines; }
-  public java.util.List<AssemblerFixup> getFixups() { return fixups; }
+  public List<AssemblerLine> getLines() { return lines; }
+  public List<AssemblerFixup> getFixups() { return fixups; }
 
   public AssemblerState() {}
 }

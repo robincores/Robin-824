@@ -1,12 +1,11 @@
 package io.github.robincores.toolchain.r8cc;
 
-import io.github.robincores.toolchain.r8cc.antlr.R8CLexer;
-import io.github.robincores.toolchain.r8cc.antlr.R8CParser;
-import io.github.robincores.toolchain.r8cc.ast.AstBuilder;
 import io.github.robincores.toolchain.r8cc.ir.IrBuilder;
 import io.github.robincores.toolchain.r8cc.ir.IrInstr;
 import org.antlr.v4.runtime.*;
 import org.junit.jupiter.api.Test;
+
+import io.github.robincores.toolchain.r8cc.ast.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 

@@ -1,13 +1,22 @@
 package io.github.robincores.toolchain.r8cc.cli;
 
-import io.github.robincores.toolchain.r8cc.antlr.R8CLexer;
-import io.github.robincores.toolchain.r8cc.antlr.R8CParser;
+import io.github.robincores.toolchain.r8cc.R8CLexer;
+import io.github.robincores.toolchain.r8cc.R8CParser;
 import io.github.robincores.toolchain.r8cc.ast.AstBuilder;
+import io.github.robincores.toolchain.r8cc.ast.TranslationUnit;
+import io.github.robincores.toolchain.r8cc.backend.r8.R816Dialect;
 import io.github.robincores.toolchain.r8cc.backend.r8.R8AsmEmitter;
 import io.github.robincores.toolchain.r8cc.backend.r8.R8PseudoDialect;
 import io.github.robincores.toolchain.r8cc.ir.IrBuilder;
 import io.github.robincores.toolchain.r8cc.ir.IrPrinter;
-import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.BaseErrorListener;
+import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.Vocabulary;
 
 import java.nio.file.Path;
 
@@ -35,20 +44,20 @@ public final class Main {
 
             case "--ast" -> {
                 var cu = parse(lexer);
-                var ast = new AstBuilder().build(cu);
+                var ast = buildAst(cu);
                 System.out.println(ast);
             }
 
             case "--ir" -> {
                 var cu = parse(lexer);
-                var ast = new AstBuilder().build(cu);
+                var ast = buildAst(cu);
                 var ir = new IrBuilder().build(ast);
                 System.out.print(new IrPrinter().print(ir));
             }
 
             case "--asm" -> {
                 var cu = parse(lexer);
-                var ast = new AstBuilder().build(cu);
+                var ast = buildAst(cu);
                 var ir = new IrBuilder().build(ast);
 
                 var asm = new R8AsmEmitter(new R8PseudoDialect()).emit(ir);
@@ -57,10 +66,10 @@ public final class Main {
 
             case "--asm-r816" -> {
                 var cu = parse(lexer);
-                var ast = new AstBuilder().build(cu);
-                var ir  = new IrBuilder().build(ast);
+                var ast = buildAst(cu);
+                var ir = new IrBuilder().build(ast);
 
-                var asm = new R8AsmEmitter(new io.github.robincores.toolchain.r8cc.backend.r8.R816Dialect()).emit(ir);
+                var asm = new R8AsmEmitter(new R816Dialect()).emit(ir);
                 System.out.print(asm);
             }
 
@@ -69,6 +78,11 @@ public final class Main {
                 System.exit(2);
             }
         }
+    }
+
+    private static TranslationUnit buildAst(R8CParser.TranslationUnitContext cu) {
+        AstBuilder builder = new AstBuilder();
+        return builder.build(cu);
     }
 
     private static void dumpTokens(R8CLexer lexer) {

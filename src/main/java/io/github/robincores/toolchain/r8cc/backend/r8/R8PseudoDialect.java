@@ -11,22 +11,17 @@ public final class R8PseudoDialect implements R8AsmDialect {
     }
 
     @Override public String funcLabel(String name) { return name + ":"; }
-
     @Override public String funcPrologue(int paramCount) { return ""; }
-
     @Override public String pushConst(int value) { return "  PUSH_CONST " + value; }
-
     @Override public String loadParam(int index) { return "  LOAD_PARAM " + index; }
-
     @Override public String bin(String op) { return "  BIN " + op; }
-
     @Override public String un(String op) { return "  UN " + op; }
-
     @Override public String call(String name, int argc) { return "  CALL " + name + " " + argc; }
-
     @Override public String ret() { return "  RET"; }
-
     @Override public String loadLocal(int wk)  { return "  LOAD_LOCAL w" + wk; }
     @Override public String storeLocal(int wk) { return "  STORE_LOCAL w" + wk; }
     @Override public String pop1()             { return "  POP1"; }
+    @Override public String label(String name) { return name + ":"; }
+    @Override public String jmp(String target) { return "  JMP " + target; }
+    @Override public String brIfZero(String target) { return "  BR_IF_ZERO " + target; }
 }

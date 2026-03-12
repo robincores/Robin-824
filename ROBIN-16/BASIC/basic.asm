@@ -9,7 +9,7 @@
 .width 8
 
 .include "ROBIN-16/BIOS/ports.inc"
-.include "ROBIN-16/BIOS/macros.inc"
+.include "ROBIN-16/LIB/io.inc"
 
 ; ---------------- BASIC memory ----------------
 .equ LINE_BUF     0x9100
@@ -60,7 +60,12 @@ start:
   i 0xBEFE
   stl sp
 
-  CALL bios_term_init
+  ; --- install BIOS trap vector (required before any ECALL) ---
+  i bios_trap
+  csrw CSR_MTVEC
+
+
+  BIOS_CALL0 SYS_TERM_INIT
   CALL prog_new
   CALL vars_init
 
@@ -87,27 +92,17 @@ start:
   i SYS_FOR_SP
   u 0
   sb
-
-  i banner
-  stl w0
-  CALL bios_puts_z
+  LIB_PUTS_Z_IMM banner
 
 .Lbasic_repl:
   i SYS_PROMPT
   lu
   i0
   beq .Lno_prompt
-
-  i ready
-  stl w0
-  CALL bios_puts_z
+  LIB_PUTS_Z_IMM ready
 
 .Lno_prompt:
-  i LINE_BUF
-  stl w0
-  i LINE_MAX
-  stl w1
-  CALL bios_kbd_readline
+  LIB_READLINE_IMM LINE_BUF, LINE_MAX
 
   i LINE_BUF
   stl w0
@@ -353,10 +348,8 @@ beq .Lbasic_done
 
 
   ; unknown
-i err_syntax
-stl w0
-CALL bios_puts_z
-CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
 
 ; If we are RUNning, abort RUN on syntax error
 i SYS_RUNNING
@@ -393,6 +386,7 @@ err_syntax:
 ; includes at end
 .include "ROBIN-16/BIOS/con.asm"
 .include "ROBIN-16/BIOS/kbd.asm"
+.include "ROBIN-16/BIOS/trap.asm"
 .include "ROBIN-16/BASIC/tok.asm"
 .include "ROBIN-16/BASIC/vars.asm"
 .include "ROBIN-16/BASIC/expr.asm"

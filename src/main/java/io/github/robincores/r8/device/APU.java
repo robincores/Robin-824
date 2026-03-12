@@ -1,7 +1,3 @@
-// NOTE: This file is intended as a drop-in replacement for
-// src/main/java/io/github/robincores/r8/device/APU.java
-// in the RobinCores repository.
-
 package io.github.robincores.r8.device;
 
 import io.github.robincores.r8.bus.BusDevice;
@@ -176,7 +172,7 @@ public final class APU implements BusDevice, Tickable, AutoCloseable {
     // ---------------------------------------------------------------------
     private final byte[] regs = new byte[SIZE];
 
-    private final long cpuHz;
+    private final long busHz;
     private final double cyclesPerSample;
     private final double cyclesPerFrameTick;
 
@@ -211,14 +207,14 @@ public final class APU implements BusDevice, Tickable, AutoCloseable {
 
     private int status = 0;
 
-    public APU(RAM ram, long cpuHz, InterruptSink sink, int irqBit) {
+    public APU(RAM ram, long busHz, InterruptSink sink, int irqBit) {
         this.ram = ram;
-        this.cpuHz = cpuHz;
+        this.busHz = busHz;
         this.sink = sink;
         this.irqBit = irqBit;
 
-        this.cyclesPerSample = (double) cpuHz / (double) SAMPLE_RATE;
-        this.cyclesPerFrameTick = (double) cpuHz / (double) FRAME_HZ;
+        this.cyclesPerSample = (double) busHz / (double) SAMPLE_RATE;
+        this.cyclesPerFrameTick = (double) busHz / (double) FRAME_HZ;
 
         // defaults
         regs[G_MASTER_VOL] = (byte) 0xFF;

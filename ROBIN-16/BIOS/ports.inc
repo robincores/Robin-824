@@ -1,3 +1,5 @@
+.once
+
 ; BIOS/R816/ports.inc
 ; Pure constants / MMIO map (no code)
 

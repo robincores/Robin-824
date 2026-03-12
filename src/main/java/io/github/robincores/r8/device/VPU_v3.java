@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>WIN_MMIO=0: banked memory: vbank 0..7 = VRAM planes, vbank 8 = SPR bank</li>
  * </ul>
  */
-public final class VPU_v3 implements Tickable {
+public final class VPU_v3 implements VPU, Tickable {
 
     // =====================================================================
     // Memory organization

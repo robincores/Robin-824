@@ -1,7 +1,7 @@
 package io.github.robincores.toolchain.r8cc;
 
-import io.github.robincores.toolchain.r8cc.antlr.R8CLexer;
-import io.github.robincores.toolchain.r8cc.antlr.R8CParser;
+import io.github.robincores.toolchain.r8cc.R8CLexer;
+import io.github.robincores.toolchain.r8cc.R8CParser;
 import org.antlr.v4.runtime.*;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.junit.jupiter.api.Test;

@@ -15,7 +15,7 @@ import java.nio.charset.StandardCharsets;
 public final class ApuYmDemo_env {
 
     // Adjust as needed for your emulator/system clock
-    private static final int CPU_HZ = 12_500_000;
+    private static final long CPU_HZ = 12_572_000L;
 
     // RAM backing (YM doesn't need it, but APU requires one for PCM subsystem)
     private static final int RAM_BYTES = 1 << 20; // 1MB

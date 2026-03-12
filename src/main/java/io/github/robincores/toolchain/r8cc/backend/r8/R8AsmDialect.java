@@ -4,7 +4,6 @@ public interface R8AsmDialect {
     String preamble();
     String funcLabel(String name);
 
-    /** Optional prologue inserted right after label. Can be empty. */
     String funcPrologue(int paramCount);
 
     String pushConst(int value);
@@ -14,11 +13,13 @@ public interface R8AsmDialect {
     String un(String op);
 
     String call(String name, int argc);
-
-    /** Can be multi-line (e.g., load return address then jr). */
     String ret();
 
     String loadLocal(int wk);
     String storeLocal(int wk);
     String pop1();
+
+    String label(String name);
+    String jmp(String target);
+    String brIfZero(String target);
 }

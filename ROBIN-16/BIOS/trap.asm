@@ -1,9 +1,13 @@
-; BIOS ECALL trap handler
-; Requires: csrr/csrw in r816.json
-; Contract: uses w0..w3 args, returns in w0
+.once
 
-;.include "ROBIN-16/BIOS/ports.inc"
-;.include "ROBIN-16/BIOS/bios.inc"
+; BIOS ECALL trap handler
+; Contract (syscall ABI):
+;   w0 = syscall number
+;   w1..w3 = args
+;   return in w0
+;
+.include "ROBIN-16/BIOS/bios.inc"
+.include "ROBIN-16/BIOS/macros.inc"
 
 bios_trap:
   ; --- return to instruction AFTER ECALL ---
@@ -11,7 +15,11 @@ bios_trap:
   inc                ; A = mepc + 1  (ECALL is 1 byte)
   csrw CSR_MEPC      ; mepc = A
 
-  ; --- dispatch: if (w0 == SYS_xxx) ---
+  ; --- dispatch on w0 (syscall number) ---
+  ldl w0
+  u SYS_TERM_INIT
+  beq .Ltrap_term_init
+
   ldl w0
   u SYS_PUTC
   beq .Ltrap_putc
@@ -22,85 +30,67 @@ bios_trap:
 
   ldl w0
   u SYS_GETC_BLOCK
-  beq .Ltrap_getc
+  beq .Ltrap_getc_block
 
   ldl w0
-  u SYS_TERM_INIT
-  beq .Ltrap_term_init
+  u SYS_READLINE
+  beq .Ltrap_readline
 
-  ; default: return 0xFF (error/unknown syscall)
+  ldl w0
+  u SYS_CRLF
+  beq .Ltrap_crlf
+
+  ldl w0
+  u SYS_CLS
+  beq .Ltrap_cls
+
+  ldl w0
+  u SYS_PRINT_U16
+  beq .Ltrap_print_u16
+
+  ; unknown syscall => return 0x00FF
   u 0xFF
   stl w0
   iret
 
+.Ltrap_term_init:
+  CALL bios_term_init
+  iret
+
 .Ltrap_putc:
-  ; write char (w1) to TX_PORT
-  i VPU_TX_PORT
   ldl w1
-  sb
-  i0
   stl w0
+  CALL bios_putc
   iret
 
 .Ltrap_puts_z:
-  ; w1 = ptr
   ldl w1
-  stl w10          ; ptr in w10
-
-.Ltrap_puts_loop:
-  ldl w10
-  lu
-  stl w11          ; ch
-
-  ldl w11
-  i0
-  beq .Ltrap_puts_done
-
-  i VPU_TX_PORT
-  ldl w11
-  sb
-
-  ldl w10
-  inc
-  stl w10
-  bra .Ltrap_puts_loop
-
-.Ltrap_puts_done:
-  i0
   stl w0
+  CALL bios_puts_z
   iret
 
-.Ltrap_getc:
-.Lkbd_wait:
-  i KBD_STATUS
-  lu
-  u 1
-  and
-  i0
-  beq .Lkbd_wait
-
-  i KBD_DATA
-  lu
-  stl w0
+.Ltrap_getc_block:
+  CALL bios_kbd_getc_block
   iret
 
-.Ltrap_term_init:
-  ; minimal: same as your term_init body (inline or copy)
-  ; (kept short here—move full body from your proven code)
-  WB SYS_VIDWIN, VIDWIN_MMIO_BIT
-  WB VPU_OVL_MODE, OVL_TEXT
-  WB VPU_CTRL, CTRL_DEFAULT
-  WB VPU_MODE, GFX_MODE
-  WB VPU_TX_CTRL, TXCTRL_DEFAULT
-  WB VPU_TX_CUR_START, 0x00
-  WB VPU_TX_CUR_END,   0x0F
-  WB VPU_TX_ORG_L, 0x00
-  WB VPU_TX_ORG_H, 0x00
-  WB VPU_TX_FINE_Y, 0x00
-  WB VPU_TX_FINE_X, 0x00
-  WB VPU_TX_ATTR, 0x0F
-  WB VPU_TX_CMD, TXCMD_HOME_CLS
-
-  i0
+.Ltrap_readline:
+  ldl w1
   stl w0
+  ldl w2
+  stl w1
+  CALL bios_kbd_readline
+  iret
+
+.Ltrap_crlf:
+  CALL bios_crlf
+  iret
+
+.Ltrap_cls:
+  CALL bios_cls
+  iret
+
+.Ltrap_print_u16:
+  ldl w1
+  stl w0
+  CALL bios_print_u16
   iret

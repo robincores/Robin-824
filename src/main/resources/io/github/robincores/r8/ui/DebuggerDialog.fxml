@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane style="-fx-background-color: -fx-control-inner-background;" xmlns="http://javafx.com/javafx/17.0.12" xmlns:fx="http://javafx.com/fxml/1" fx:controller="io.github.robincores.r8.ui.DebuggerController">
+
+    <center>
+        <!-- LEFT main area + RIGHT sidebar -->
+        <SplitPane dividerPositions="0.66">
+
+            <!-- LEFT: Memory (top) + Breakpoints (bottom), 2:1 -->
+            <SplitPane dividerPositions="0.66" orientation="VERTICAL" style="-fx-padding: 10;">
+
+                <!-- Memory -->
+                <VBox spacing="8">
+                    <HBox alignment="CENTER_LEFT" spacing="10">
+                        <Label style="-fx-font-weight: bold;" text="Memory" />
+                        <CheckBox fx:id="chkFollowPC" text="Follow PC" />
+                        <CheckBox fx:id="chkFollowSP" text="Follow SP" />
+                        <Region HBox.hgrow="ALWAYS" />
+                        <Label fx:id="lblMemHint" style="-fx-opacity: 0.7;" text="" />
+                    </HBox>
+
+                    <HBox spacing="6">
+                        <TextField fx:id="txtMemAddr" promptText="Address (hex), e.g. 0000" HBox.hgrow="ALWAYS" />
+                        <Button onAction="#onMemFromIP" text="Stop PC" />
+                        <Button onAction="#onMemFromSP" text="SP" />
+                        <Button onAction="#onMemGo" text="Go" />
+                    </HBox>
+
+                    <TableView fx:id="tblMem" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" VBox.vgrow="ALWAYS">
+                        <columns>
+                            <TableColumn fx:id="colMemAddr" prefWidth="70" text="Addr" />
+                            <TableColumn fx:id="colMemHex" prefWidth="420" text="Bytes" />
+                            <TableColumn fx:id="colMemAscii" prefWidth="140" text="ASCII" />
+                        </columns>
+                    </TableView>
+                </VBox>
+
+                <!-- Breakpoints -->
+                <VBox spacing="8">
+                    <HBox alignment="CENTER_LEFT" spacing="10" style="-fx-padding: 4 0 0 0;">
+                        <Label style="-fx-font-weight: bold;" text="Breakpoints" />
+                        <Label fx:id="lblBpCount" style="-fx-opacity: 0.7;" text="" />
+                    </HBox>
+
+                    <HBox spacing="6">
+                        <TextField fx:id="txtBpAddr" promptText="Address (hex), e.g. 8000" HBox.hgrow="ALWAYS" />
+                        <Button onAction="#onAddBreakpoint" text="Add" />
+                        <Button onAction="#onRemoveBreakpoint" text="Remove" />
+                        <Button onAction="#onClearBreakpoints" text="Clear" />
+                        <Button onAction="#onBpGo" text="Go" />
+                    </HBox>
+
+                    <ListView fx:id="lstBreakpoints" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" VBox.vgrow="ALWAYS" />
+
+                    <Label style="-fx-font-size: 11px; -fx-opacity: 0.75;" text="Tip: double-click a disassembly line to toggle a breakpoint. Double-click a breakpoint to remove." />
+                </VBox>
+
+            </SplitPane>
+
+            <!-- RIGHT sidebar: top = registers/workspace, bottom = disassembly (resizable split bar) -->
+            <SplitPane dividerPositions="0.48" orientation="VERTICAL" style="-fx-padding: 10;">
+
+                <!-- TOP (sidebar): Registers + workspace -->
+                <VBox spacing="8">
+                    <HBox alignment="CENTER_LEFT">
+                        <Label style="-fx-font-weight: bold;" text="Registers" />
+                        <Region HBox.hgrow="ALWAYS" />
+                        <Label fx:id="lblWordInfo" style="-fx-opacity: 0.7;" text="16-bit" />
+                    </HBox>
+
+                    <Separator />
+                    <GridPane hgap="10" vgap="6">
+                        <Label text="A (top):" GridPane.columnIndex="0" GridPane.rowIndex="0" />
+                        <Label fx:id="regA" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" text="0000" GridPane.columnIndex="1" GridPane.rowIndex="0" />
+
+                        <Label text="B:" GridPane.columnIndex="0" GridPane.rowIndex="1" />
+                        <Label fx:id="regB" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" text="0000" GridPane.columnIndex="1" GridPane.rowIndex="1" />
+
+                        <Label text="C:" GridPane.columnIndex="0" GridPane.rowIndex="2" />
+                        <Label fx:id="regC" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" text="0000" GridPane.columnIndex="1" GridPane.rowIndex="2" />
+                  <columnConstraints>
+                     <ColumnConstraints />
+                     <ColumnConstraints />
+                  </columnConstraints>
+                  <rowConstraints>
+                     <RowConstraints />
+                     <RowConstraints />
+                     <RowConstraints />
+                  </rowConstraints>
+                    </GridPane>
+
+                    <Separator />
+
+                    <HBox alignment="CENTER_LEFT" spacing="10">
+                        <Label style="-fx-font-weight: bold;" text="Workspace (w0..sp)" />
+                        <Region HBox.hgrow="ALWAYS" />
+                        <CheckBox fx:id="chkHideZeroWksp" text="Hide zero regs" />
+                    </HBox>
+
+                    <ListView fx:id="lstWksp" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" VBox.vgrow="ALWAYS" />
+                </VBox>
+
+                <!-- BOTTOM (sidebar): Disassembly + controls -->
+                <BorderPane>
+                    <top>
+                        <ToolBar>
+
+                            <!-- Debug controls placed here (near disassembly) -->
+                            <Button onAction="#onRun" text="Run" />
+                            <Button onAction="#onPause" text="Pause" />
+                            <Button onAction="#onStep" text="Step" />
+                            <Separator />
+                            <Button onAction="#onRunToCursor" text="Run→">
+                                <tooltip>
+                                    <Tooltip text="Run until selected instruction (temporary breakpoint)" />
+                                </tooltip>
+                            </Button>
+                            <Button onAction="#onDisasmToPC" text="PC">
+                                <tooltip>
+                                    <Tooltip text="Jump disassembly back to current stop PC" />
+                                </tooltip>
+                            </Button>
+
+                            <Region HBox.hgrow="ALWAYS" />
+
+                            <Label text="IP:" />
+                            <Label fx:id="regIP" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" text="0000" />
+
+                        </ToolBar>
+                    </top>
+
+                    <center>
+                        <ListView fx:id="lstDisasm" style="-fx-font-family: 'monospace'; -fx-font-size: 12px;" />
+                    </center>
+                </BorderPane>
+
+            </SplitPane>
+
+        </SplitPane>
+    </center>
+</BorderPane>

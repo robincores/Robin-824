@@ -1,10 +1,42 @@
+.once
+
 ; BIOS/R816/con.asm
-; Console routines (expects ports.inc + macros.inc already included)
+; Console routines
+
+.include "ROBIN-16/BIOS/ports.inc"
+.include "ROBIN-16/BIOS/macros.inc"
+
+; NOTE on VIDWIN safety:
+;   Graphics code often uses VIDWIN bank mode (WIN_MMIO=0) to access VRAM.
+;   These console routines temporarily force WIN_MMIO=1 while touching VPU MMIO
+;   and then restore the previous VIDWIN value.
+
+; --- internal helpers (use w13 as temp) ---
+.macro VPU_MMIO_PUSH
+  i SYS_VIDWIN
+  lb
+  stl w13
+  WB SYS_VIDWIN, VIDWIN_MMIO_BIT
+.endm
+
+.macro VPU_MMIO_POP
+  i SYS_VIDWIN
+  ldl w13
+  sb
+.endm
+
+.macro VPU_TX_PUTC_RAW
+  i VPU_TX_PORT
+  ldl w0
+  sb
+.endm
 
 bios_term_init:
   stl w14
 
+  ; Default to MMIO visible after boot (legacy behavior).
   WB SYS_VIDWIN, VIDWIN_MMIO_BIT
+
   WB VPU_OVL_MODE, OVL_TEXT
   WB VPU_CTRL, CTRL_DEFAULT
   WB VPU_MODE, GFX_MODE
@@ -26,9 +58,11 @@ bios_term_init:
 
 bios_putc:
   stl w14
-  i VPU_TX_PORT
-  ldl w0
-  sb
+
+  VPU_MMIO_PUSH
+  VPU_TX_PUTC_RAW
+  VPU_MMIO_POP
+
   ldl w14
   jr
 
@@ -36,6 +70,8 @@ bios_puts_z:
   stl w14
   ldl w0
   stl w10
+
+  VPU_MMIO_PUSH
 
 .Lcon_pz_loop:
   ldl w10
@@ -48,7 +84,7 @@ bios_puts_z:
 
   ldl w1
   stl w0
-  CALL bios_putc
+  VPU_TX_PUTC_RAW
 
   ldl w10
   inc
@@ -56,23 +92,35 @@ bios_puts_z:
   bra .Lcon_pz_loop
 
 .Lcon_pz_done:
+  VPU_MMIO_POP
   ldl w14
   jr
 
 bios_crlf:
   stl w14
+
+  VPU_MMIO_PUSH
+
   u 13
   stl w0
-  CALL bios_putc
+  VPU_TX_PUTC_RAW
+
   u 10
   stl w0
-  CALL bios_putc
+  VPU_TX_PUTC_RAW
+
+  VPU_MMIO_POP
+
   ldl w14
   jr
 
 bios_cls:
   stl w14
+
+  VPU_MMIO_PUSH
   WB VPU_TX_CMD, TXCMD_HOME_CLS
+  VPU_MMIO_POP
+
   ldl w14
   jr
 

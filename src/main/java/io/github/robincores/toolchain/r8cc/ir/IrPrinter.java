@@ -24,9 +24,12 @@ public final class IrPrinter {
             case IrInstr.Un x -> "UN " + x.op();
             case IrInstr.Call x -> "CALL " + x.name() + " " + x.argc();
             case IrInstr.Ret __ -> "RET";
-            case IrInstr.LoadLocal x  -> "LOAD_LOCAL w" + x.wk();
+            case IrInstr.LoadLocal x -> "LOAD_LOCAL w" + x.wk();
             case IrInstr.StoreLocal x -> "STORE_LOCAL w" + x.wk();
-            case IrInstr.Pop1 __      -> "POP1";
+            case IrInstr.Pop1 __ -> "POP1";
+            case IrInstr.Label x -> "LABEL " + x.name();
+            case IrInstr.Jmp x -> "JMP " + x.target();
+            case IrInstr.BrIfZero x -> "BR_IF_ZERO " + x.target();
         };
     }
 }

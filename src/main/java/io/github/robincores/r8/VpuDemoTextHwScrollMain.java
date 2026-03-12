@@ -3,7 +3,8 @@ package io.github.robincores.r8;
 import io.github.robincores.r8.bus.BusMap;
 import io.github.robincores.r8.cpu.R816;
 import io.github.robincores.r8.device.DisplayConfig;
-import io.github.robincores.r8.device.VPU;
+import io.github.robincores.r8.device.VPU_v2;
+import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
@@ -12,18 +13,28 @@ import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 import static io.github.robincores.r8.cpu.R8Core.EXTERNAL_INTERRUPT_MASK;
 
 /**
  * Manual VPU demo: VGA-style HARDWARE scrolling text (CRTC Start Address equivalent).
  *
- * Requires VPU support for:
- *   REG_TX_ORIGIN_L = 0x0013
- *   REG_TX_ORIGIN_H = 0x0014
+ * Updated for NEW VPU:
+ * - Mode 4 removed (REG_MODE is 0..3 only)
+ * - Text exists ONLY via MMIO overlay personality (Text Buffer + Font RAM)
+ * - New MMIO memory map:
+ *     Text RAM:   0x2000–0x2F9F
+ *     Font RAM:   0x3000–0x3FFF
+ *     Copper RAM: 0x1000–0x1FFF
+ *     Overlay select: REG_OVL_MODE (0x001F) bit0: 0=text, 1=tiles
  *
  * The demo keeps text RAM as a ring buffer (80x25), scrolling by advancing TX_ORIGIN by 80 cells.
  * This is the BASIC-friendly approach: cheap scroll, no memmove.
+ *
+ * Smoothness improvements:
+ * - time-paced loop (stable cadence, less jitter)
+ * - vpu.tick(cyclesPerFrame) in one call for consistent frame stepping
  */
 public final class VpuDemoTextHwScrollMain extends Application {
 
@@ -35,28 +46,33 @@ public final class VpuDemoTextHwScrollMain extends Application {
             400
     );
 
-    private static final int TEXT_BASE = 0x0300;
+    private static final int TEXT_BASE = 0x2000; // NEW MAP
     private static final int TEXT_COLS = 80;
     private static final int TEXT_ROWS = 25;
     private static final int TOTAL_CELLS = TEXT_COLS * TEXT_ROWS;
 
     // VPU regs
-    private static final int REG_MODE = 0x0002;
-    private static final int REG_TX_CTRL = 0x0007;
-    private static final int REG_TX_CUR_X = 0x0008;
-    private static final int REG_TX_CUR_Y = 0x0009;
+    private static final int REG_MODE        = 0x0002; // 0..3
+    private static final int REG_TX_CTRL     = 0x0007;
+    private static final int REG_TX_CUR_X    = 0x0008;
+    private static final int REG_TX_CUR_Y    = 0x0009;
 
-    // NEW: hardware scroll origin (cell offset)
+    // Hardware scroll origin (cell offset)
     private static final int REG_TX_ORIGIN_L = 0x0013;
     private static final int REG_TX_ORIGIN_H = 0x0014;
 
+    private static final int REG_OVL_MODE    = 0x001F; // bit0: 0=text personality, 1=tiles
+
     // TX_CTRL bits
-    private static final int TX_CURSOR_EN = 0x02;
+    private static final int TX_EN           = 0x01;
+    private static final int TX_CURSOR_EN    = 0x02;
     private static final int TX_CURSOR_BLINK = 0x08;
 
     private final AtomicBoolean running = new AtomicBoolean(true);
     private Thread emuThread;
     private Stage stage;
+
+    private AnimationTimer fxTimer;
 
     @Override
     public void start(Stage stage) {
@@ -66,18 +82,30 @@ public final class VpuDemoTextHwScrollMain extends Application {
         StackPane root = new StackPane(canvas);
 
         Scene scene = new Scene(root, DISPLAY_CONFIG.canvasWidth(), DISPLAY_CONFIG.canvasHeight());
-        stage.setTitle("VPU Text HW Scroll Demo (VGA-style Start Address)");
+        stage.setTitle("VPU Text HW Scroll Demo (VGA-style Start Address) — new MMIO map");
         stage.setScene(scene);
         stage.setResizable(true);
         stage.show();
 
         BusMap bus = new BusMap(0xFFFF);
         R816 cpu = new R816(bus);
-        VPU vpu = new VPU(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
+        VPU_v2 vpu = new VPU_v2(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
 
-        // Text-only mode
-        vpu.writeMmio(REG_MODE, (byte) 4);
-        vpu.writeMmio(REG_TX_CTRL, (byte) (TX_CURSOR_EN | TX_CURSOR_BLINK));
+        // FX-thread present pulse
+        fxTimer = new AnimationTimer() {
+            @Override public void handle(long now) { vpu.fxPulse(); }
+        };
+        fxTimer.start();
+
+        // Select TEXT overlay personality explicitly.
+        vpu.writeMmio(REG_OVL_MODE, (byte) 0x00);
+
+        // Pick any graphics mode (0..3). Text overlay will draw on top.
+        // Use mode 0 for a clean background.
+        vpu.writeMmio(REG_MODE, (byte) 0);
+
+        // Text visible; cursor on
+        vpu.writeMmio(REG_TX_CTRL, (byte) (TX_EN | TX_CURSOR_EN | TX_CURSOR_BLINK));
 
         TerminalHwScroll term = new TerminalHwScroll(vpu, 0x07, 0x00);
         term.clear();
@@ -98,8 +126,12 @@ public final class VpuDemoTextHwScrollMain extends Application {
         stage.setOnCloseRequest(e -> running.set(false));
     }
 
-    private void runDemo(VPU vpu, TerminalHwScroll term, int cyclesPerFrame) {
+    private void runDemo(VPU_v2 vpu, TerminalHwScroll term, int cyclesPerFrame) {
         int n = 1;
+
+        // Smooth pacing target
+        final long frameNanosTarget = (long) (1_000_000_000L / 70.0); // ~70Hz
+        long next = System.nanoTime();
 
         while (running.get()) {
             term.setColor(0x0A, 0x00);
@@ -116,13 +148,14 @@ public final class VpuDemoTextHwScrollMain extends Application {
             vpu.writeMmio(REG_TX_CUR_X, (byte) term.curX);
             vpu.writeMmio(REG_TX_CUR_Y, (byte) term.curY);
 
-            // Run a few frames
-            for (int f = 0; f < 6; f++) {
-                int chunk = 5_000;
-                for (int done = 0; done < cyclesPerFrame; done += chunk) {
-                    vpu.tick(Math.min(chunk, cyclesPerFrame - done));
-                }
-                try { Thread.sleep(14); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            // Run a few frames with stable cadence
+            for (int f = 0; f < 6 && running.get(); f++) {
+                vpu.tick(cyclesPerFrame);
+
+                next += frameNanosTarget;
+                long sleep = next - System.nanoTime();
+                if (sleep > 0) LockSupport.parkNanos(sleep);
+                else next = System.nanoTime();
             }
 
             n++;
@@ -134,8 +167,15 @@ public final class VpuDemoTextHwScrollMain extends Application {
     @Override
     public void stop() {
         running.set(false);
+
+        if (fxTimer != null) {
+            fxTimer.stop();
+            fxTimer = null;
+        }
+
         if (emuThread != null) {
-            try { emuThread.join(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try { emuThread.join(500); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 
@@ -147,7 +187,7 @@ public final class VpuDemoTextHwScrollMain extends Application {
      * BASIC-friendly terminal that uses TX_ORIGIN as a ring buffer scroll pointer.
      */
     private static final class TerminalHwScroll {
-        private final VPU vpu;
+        private final VPU_v2 vpu;
 
         private int fg;
         private int bg;
@@ -158,7 +198,7 @@ public final class VpuDemoTextHwScrollMain extends Application {
         // origin in cells (0..1999)
         private int origin = 0;
 
-        TerminalHwScroll(VPU vpu, int fg, int bg) {
+        TerminalHwScroll(VPU_v2 vpu, int fg, int bg) {
             this.vpu = vpu;
             this.fg = fg & 0x0F;
             this.bg = bg & 0x0F;
@@ -171,7 +211,6 @@ public final class VpuDemoTextHwScrollMain extends Application {
         }
 
         void clear() {
-            // Clear entire backing buffer
             for (int cell = 0; cell < TOTAL_CELLS; cell++) {
                 writeCell(cell, ' ', fg, bg);
             }
@@ -190,15 +229,11 @@ public final class VpuDemoTextHwScrollMain extends Application {
             }
         }
 
-        void println(String s) {
-            print(s);
-            newline();
-        }
+        void println(String s) { print(s); newline(); }
 
         private void putChar(char ch) {
             if (curX >= TEXT_COLS) newline();
 
-            // Screen cell index (0..1999) = origin + y*80 + x (wrapped)
             int screenCell = origin + curY * TEXT_COLS + curX;
             screenCell %= TOTAL_CELLS;
 
@@ -223,8 +258,6 @@ public final class VpuDemoTextHwScrollMain extends Application {
             origin %= TOTAL_CELLS;
             writeOrigin();
 
-            // Clear bottom row in the backing buffer:
-            // bottomRowStartCell = origin + 24*80 (wrapped)
             int bottom = origin + (TEXT_ROWS - 1) * TEXT_COLS;
             bottom %= TOTAL_CELLS;
 

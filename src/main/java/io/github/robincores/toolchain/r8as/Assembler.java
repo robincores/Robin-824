@@ -86,12 +86,14 @@ public class Assembler {
     List<AssemblerError> errors = new ArrayList<>();
 
     // Source context for .include/.module (best-effort; supports nested includes)
-    private final java.util.Deque<java.nio.file.Path> sourceDirStack = new java.util.ArrayDeque<>();
-    private java.nio.file.Path currentSourceDir = null;
+    private final Deque<Path> sourceDirStack = new ArrayDeque<>();
+    private Path currentSourceDir = null;
 
     // Include handling (.include/.module)
-    private final java.util.List<java.nio.file.Path> includeSearchPaths = new java.util.ArrayList<>();
-    private final java.util.Deque<String> includeStack = new java.util.ArrayDeque<>();
+    private final List<Path> includeSearchPaths = new ArrayList<>();
+    private final Deque<String> includeStack = new ArrayDeque<>();
+    /** Set of include keys for sources that declared `.once` (file path or classpath:ref). */
+    private final Set<String> onceSources = new HashSet<>();
     private int maxIncludeDepth = 32;
 
     // Macro handling (.macro/.endm)
@@ -139,6 +141,102 @@ public class Assembler {
             this.source = source;
             this.line = line;
         }
+    }
+
+
+    // ----- Branch relaxation (optional; off by default) -----
+    public enum RelaxLevel {
+        SHORT,   // original instruction (rel8)
+        REL16,   // widen to rel16 jump sequence (e.g. j target)
+        ABS      // widen to absolute jump sequence (e.g. i target; jr)
+    }
+
+    private static final class RelaxSite {
+        final String source;
+        final int line;
+
+        RelaxSite(String source, int line) {
+            this.source = (source == null) ? "<input>" : source;
+            this.line = line;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof RelaxSite)) return false;
+            RelaxSite r = (RelaxSite) o;
+            return line == r.line && Objects.equals(source, r.source);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(source, line);
+        }
+
+        @Override
+        public String toString() {
+            return source + ":" + line;
+        }
+    }
+
+    private boolean relaxEnabled = false;
+    private int relaxMaxPasses = 12;
+    private boolean relaxDriver = true; // true on user instance; false on internal per-pass assemblers
+    private Map<RelaxSite, RelaxLevel> relaxPlan = new HashMap<>();
+    private Map<RelaxSite, RelaxLevel> relaxRequests = new HashMap<>();
+
+    public Assembler setRelaxBranches(boolean on) {
+        this.relaxEnabled = on;
+        return this;
+    }
+
+    public Assembler setRelax(boolean on) {
+        return setRelaxBranches(on);
+    }
+
+    public Assembler setRelaxMaxPasses(int n) {
+        if (n > 0) this.relaxMaxPasses = n;
+        return this;
+    }
+
+    private static RelaxLevel maxRelax(RelaxLevel a, RelaxLevel b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return (a.ordinal() >= b.ordinal()) ? a : b;
+    }
+
+    private static boolean isRel8BranchMnemonic(String m) {
+        if (m == null) return false;
+        m = m.toLowerCase(Locale.ROOT);
+        return m.equals("bra") || m.equals("beq") || m.equals("bne")
+                || m.equals("blt") || m.equals("bltu")
+                || m.equals("bge") || m.equals("bgeu");
+    }
+
+    private static boolean isRel16JumpMnemonic(String m) {
+        return m != null && m.equalsIgnoreCase("j");
+    }
+
+    private static boolean isRelaxableMnemonic(String m) {
+        return isRel8BranchMnemonic(m) || isRel16JumpMnemonic(m);
+    }
+
+    private static String invertCond(String m) {
+        if (m == null) return null;
+        m = m.toLowerCase(Locale.ROOT);
+        return switch (m) {
+            case "beq" -> "bne";
+            case "bne" -> "beq";
+            case "blt" -> "bge";
+            case "bge" -> "blt";
+            case "bltu" -> "bgeu";
+            case "bgeu" -> "bltu";
+            default -> null;
+        };
+    }
+
+    private RelaxSite siteFor(String source, int line) {
+        return new RelaxSite((source == null || source.isBlank()) ? this.currentSourceName : source, line > 0 ? line : this.linenum);
     }
 
     private final Deque<IfFrame> ifStack = new ArrayDeque<>();
@@ -195,7 +293,10 @@ public class Assembler {
             case ".ifdef": {
                 boolean parent = ccActive();
                 String name = firstWord(rest).toLowerCase(Locale.ROOT);
-                if (name.isEmpty()) { fatal("Usage: .ifdef NAME"); return; }
+                if (name.isEmpty()) {
+                    fatal("Usage: .ifdef NAME");
+                    return;
+                }
                 boolean cond = parent && symbols.containsKey(name);
                 ifStack.push(new IfFrame(parent, cond, ".ifdef", currentSourceName, linenum));
                 return;
@@ -203,7 +304,10 @@ public class Assembler {
             case ".ifndef": {
                 boolean parent = ccActive();
                 String name = firstWord(rest).toLowerCase(Locale.ROOT);
-                if (name.isEmpty()) { fatal("Usage: .ifndef NAME"); return; }
+                if (name.isEmpty()) {
+                    fatal("Usage: .ifndef NAME");
+                    return;
+                }
                 boolean cond = parent && !symbols.containsKey(name);
                 ifStack.push(new IfFrame(parent, cond, ".ifndef", currentSourceName, linenum));
                 return;
@@ -211,11 +315,23 @@ public class Assembler {
             case ".elif":
             case ".elseif": {
                 IfFrame f = ifStack.peek();
-                if (f == null) { fatal(cmd + " without matching .if"); return; }
-                if (f.elseSeen) { fatal(cmd + " after .else is not allowed"); return; }
+                if (f == null) {
+                    fatal(cmd + " without matching .if");
+                    return;
+                }
+                if (f.elseSeen) {
+                    fatal(cmd + " after .else is not allowed");
+                    return;
+                }
 
-                if (!f.parentActive) { f.active = false; return; }
-                if (f.branchTaken) { f.active = false; return; }
+                if (!f.parentActive) {
+                    f.active = false;
+                    return;
+                }
+                if (f.branchTaken) {
+                    f.active = false;
+                    return;
+                }
 
                 boolean cond = evalCondExpr(rest, cmd);
                 f.active = cond;
@@ -224,18 +340,31 @@ public class Assembler {
             }
             case ".else": {
                 IfFrame f = ifStack.peek();
-                if (f == null) { fatal(".else without matching .if"); return; }
-                if (f.elseSeen) { fatal("Duplicate .else"); return; }
+                if (f == null) {
+                    fatal(".else without matching .if");
+                    return;
+                }
+                if (f.elseSeen) {
+                    fatal("Duplicate .else");
+                    return;
+                }
                 f.elseSeen = true;
 
-                if (!f.parentActive) { f.active = false; f.branchTaken = true; return; }
+                if (!f.parentActive) {
+                    f.active = false;
+                    f.branchTaken = true;
+                    return;
+                }
                 f.active = !f.branchTaken;
                 f.branchTaken = true;
                 return;
             }
             case ".endif": {
                 IfFrame f = ifStack.peek();
-                if (f == null) { fatal(".endif without matching .if"); return; }
+                if (f == null) {
+                    fatal(".endif without matching .if");
+                    return;
+                }
                 ifStack.pop();
                 return;
             }
@@ -246,9 +375,9 @@ public class Assembler {
 
     /**
      * Returns true if:
-     *  - line is a cc directive and was handled, OR
-     *  - line is inside an inactive block and must be skipped.
-     *
+     * - line is a cc directive and was handled, OR
+     * - line is inside an inactive block and must be skipped.
+     * <p>
      * IMPORTANT: must run BEFORE numeric label/normal label recording.
      */
     private boolean handleCcOrSkip(String noCommentLine) {
@@ -303,6 +432,7 @@ public class Assembler {
 
     // Better diagnostics (source + column)
     private String currentSourceName = "<input>";
+    private String currentSourceKey  = "<input>"; // stable key: file path or classpath:ref
     private int currentCol = 1; // 1-based, best-effort
     private String currentInstrText = null; // for fixup diagnostics (best-effort)
 
@@ -361,7 +491,7 @@ public class Assembler {
     /**
      * Adds a filesystem include search path (used by .include/.module).
      */
-    public Assembler addIncludePath(java.nio.file.Path dir) {
+    public Assembler addIncludePath(Path dir) {
         if (dir != null) includeSearchPaths.add(dir);
         return this;
     }
@@ -456,7 +586,7 @@ public class Assembler {
                 }
 
                 if (v.aliases != null && !v.aliases.isEmpty()) {
-                    Map<String, String> normAliases = new java.util.LinkedHashMap<>();
+                    Map<String, String> normAliases = new LinkedHashMap<>();
                     for (var e : v.aliases.entrySet()) {
                         if (e.getKey() == null || e.getValue() == null) continue;
                         normAliases.put(e.getKey().trim().toLowerCase(Locale.ROOT), e.getValue().trim().toLowerCase(Locale.ROOT));
@@ -946,8 +1076,8 @@ public class Assembler {
             return mnemonic;
         }
 
-        java.util.List<String> ops = splitTopLevelCommas(rest);
-        java.util.List<String> out = new java.util.ArrayList<>();
+        List<String> ops = splitTopLevelCommas(rest);
+        List<String> out = new ArrayList<>();
         for (String op : ops) {
             String x = canonicalizeOperandExpression(op.trim());
             if (!x.isEmpty()) out.add(x);
@@ -955,8 +1085,8 @@ public class Assembler {
         return mnemonic + " " + String.join(",", out);
     }
 
-    private static java.util.List<String> splitTopLevelCommas(String s) {
-        java.util.List<String> out = new java.util.ArrayList<>();
+    private static List<String> splitTopLevelCommas(String s) {
+        List<String> out = new ArrayList<>();
         int depth = 0;
         int last = 0;
         for (int i = 0; i < s.length(); i++) {
@@ -1146,8 +1276,21 @@ public class Assembler {
                         long min = signedMin(v.bits);
                         long maxFit = v.iprel ? signedMax(v.bits) : storeMask;
                         if (v.bits < 64 && (xl < min || xl > maxFit)) {
+
                             if (v.iprel) {
-                                return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use a far-branch macro (e.g. brafar/beqfar) or 'j'.");
+                                // If relaxation is enabled and this came from a branch/jump, defer as a fixup
+                                // so finish() can request widening and retry in a later pass.
+                                String mm = firstWord(this.currentInstrText == null ? "" : this.currentInstrText).toLowerCase(Locale.ROOT);
+                                if (relaxEnabled && isRelaxableMnemonic(mm)) {
+                                    curSec.fixups.add(new AssemblerFixup(
+                                            id, curSec.ip, v.bits, shift, oplen, n, this.linenum,
+                                            v.iprel, v.ipofs, v.ipmul == 0 ? 1 : v.ipmul, v.endian,
+                                            this.currentSourceName, this.currentCol, this.currentInstrText
+                                    ));
+                                    xl = 0;
+                                } else {
+                                    return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use 'j' or enable --relax.");
+                                }
                             }
                             return new AssemblerErrorResult("Value " + xl + " does not fit in " + v.bits + " bits");
                         }
@@ -1162,8 +1305,21 @@ public class Assembler {
                     long min = signedMin(v.bits);
                     long maxFit = v.iprel ? signedMax(v.bits) : storeMask;
                     if (v.bits < 64 && (xl < min || xl > maxFit)) {
+
                         if (v.iprel) {
-                            return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use a far-branch macro (e.g. brafar/beqfar) or 'j'.");
+                            // If relaxation is enabled and this came from a branch/jump, defer as a fixup
+                            // so finish() can request widening and retry in a later pass.
+                            String mm = firstWord(this.currentInstrText == null ? "" : this.currentInstrText).toLowerCase(Locale.ROOT);
+                            if (relaxEnabled && isRelaxableMnemonic(mm)) {
+                                curSec.fixups.add(new AssemblerFixup(
+                                        id, curSec.ip, v.bits, shift, oplen, n, this.linenum,
+                                        v.iprel, v.ipofs, v.ipmul == 0 ? 1 : v.ipmul, v.endian,
+                                        this.currentSourceName, this.currentCol, this.currentInstrText
+                                ));
+                                xl = 0;
+                            } else {
+                                return new AssemblerErrorResult("IP-relative offset " + xl + " out of range for " + v.bits + "-bit signed field (" + min + ".." + maxFit + "). Use 'j' or enable --relax.");
+                            }
                         }
                         return new AssemblerErrorResult("Value " + xl + " does not fit in " + v.bits + " bits");
                     }
@@ -1440,6 +1596,12 @@ public class Assembler {
                 break;
             }
 
+            case ".once": {
+                // Include guard: mark the current source as include-once. Subsequent .include/.module of the same file are skipped.
+                onceSources.add(currentSourceKey);
+                break;
+            }
+
             case ".include": {
                 String raw = String.join(" ", Arrays.copyOfRange(tokens, 1, tokens.length));
                 String path = unquote(raw);
@@ -1502,7 +1664,7 @@ public class Assembler {
                     break;
                 }
 
-                byte[] bytes = loadExternalBinary(binPath, java.util.List.of("", "include/", "assets/"));
+                byte[] bytes = loadExternalBinary(binPath, List.of("", "include/", "assets/"));
                 if (bytes == null) {
                     fatal("Cannot find/read binary: " + binPath);
                     break;
@@ -1953,7 +2115,57 @@ public class Assembler {
                     }
                 }
 
-                String lowered = pl.instruction.toLowerCase(Locale.ROOT);
+
+                String lowered = pl.instruction.toLowerCase(Locale.ROOT).trim();
+
+// Branch relaxation (optional). Uses source+line as the stable key.
+                if (relaxEnabled) {
+                    RelaxSite site = siteFor(sourceName, lineNo);
+                    RelaxLevel lvl = relaxPlan.getOrDefault(site, RelaxLevel.SHORT);
+
+                    if (lvl != RelaxLevel.SHORT) {
+                        String mnemonic = lowered.split("\\s+", 2)[0].trim().toLowerCase(Locale.ROOT);
+                        if (isRelaxableMnemonic(mnemonic)) {
+                            String argText = (lowered.length() > mnemonic.length())
+                                    ? lowered.substring(mnemonic.length()).trim()
+                                    : "";
+
+                            if (mnemonic.equals("bra")) {
+                                if (lvl == RelaxLevel.REL16) {
+                                    assembleAtNoRelax("j " + argText, sourceName, lineNo);
+                                    return null;
+                                } else { // ABS
+                                    assembleAtNoRelax("i " + argText, sourceName, lineNo);
+                                    assembleAtNoRelax("jr", sourceName, lineNo);
+                                    return null;
+                                }
+                            } else if (mnemonic.equals("j")) {
+                                if (lvl == RelaxLevel.ABS) {
+                                    assembleAtNoRelax("i " + argText, sourceName, lineNo);
+                                    assembleAtNoRelax("jr", sourceName, lineNo);
+                                    return null;
+                                }
+                                // REL16 => keep as-is
+                            } else {
+                                String inv = invertCond(mnemonic);
+                                if (inv != null) {
+                                    if (lvl == RelaxLevel.REL16) {
+                                        // 2-byte branch + 3-byte j => skip 5 bytes total
+                                        assembleAtNoRelax(inv + " .+5", sourceName, lineNo);
+                                        assembleAtNoRelax("j " + argText, sourceName, lineNo);
+                                        return null;
+                                    } else { // ABS: 2-byte branch + (3-byte i + 1-byte jr) => skip 6 bytes total
+                                        assembleAtNoRelax(inv + " .+6", sourceName, lineNo);
+                                        assembleAtNoRelax("i " + argText, sourceName, lineNo);
+                                        assembleAtNoRelax("jr", sourceName, lineNo);
+                                        return null;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 String canonical = canonicalizeInstructionExpressions(lowered);
                 String norm = normalizeForMatch(canonical);
                 return matchAndEmit(norm);
@@ -2007,10 +2219,29 @@ public class Assembler {
         long storeMask = mask64(fix.size);
         long min = signedMin(fix.size);
         long maxFit = fix.iprel ? signedMax(fix.size) : storeMask;
+
         if (fix.size < 64 && (value < min || value > maxFit)) {
+            // If relaxation is enabled and this fixup came from a branch/jump, request widening
+            // and retry in a later pass (no padding).
+            if (fix.iprel && relaxEnabled) {
+                String ctx = (fix.ctx == null) ? "" : fix.ctx.trim();
+                String mnem = firstWord(ctx).toLowerCase(Locale.ROOT);
+
+                RelaxLevel req = null;
+                if (isRel8BranchMnemonic(mnem)) req = RelaxLevel.REL16;
+                else if (isRel16JumpMnemonic(mnem)) req = RelaxLevel.ABS;
+
+                if (req != null) {
+                    RelaxSite site = siteFor(fix.source, fix.line);
+                    RelaxLevel cur = relaxRequests.get(site);
+                    relaxRequests.put(site, maxRelax(cur, req));
+                    return; // defer until next relax pass
+                }
+            }
+
             String extra = (fix.ctx != null && !fix.ctx.isBlank()) ? (" (in: " + fix.ctx + ")") : "";
             if (fix.iprel) {
-                fatalAt("IP-relative offset " + value + " out of range for " + fix.size + "-bit signed field (" + min + ".." + maxFit + ")" + extra + ". Use a far-branch macro (e.g. brafar/beqfar) or 'j'.", fix.line, fix.col, fix.source);
+                fatalAt("IP-relative offset " + value + " out of range for " + fix.size + "-bit signed field (" + min + ".." + maxFit + ")" + extra + ". Use 'j' or enable --relax.", fix.line, fix.col, fix.source);
             } else {
                 warningAt("Value " + value + " does not fit in " + fix.size + " bits" + extra, fix.line, fix.col, fix.source);
             }
@@ -2252,33 +2483,17 @@ public class Assembler {
         return state();
     }
 
-    public AssemblerState assembleFile(String text) {
-        assembleChunk(text);
-        return this.finish();
-    }
+    // --- helpers used by assembleFile/assemblePath/includes ---
 
-    public AssemblerState assemblePath(java.nio.file.Path file) {
-        java.nio.file.Path prev = currentSourceDir;
-        String prevName = currentSourceName;
-        try {
-            java.nio.file.Path abs = file.toAbsolutePath().normalize();
-            currentSourceName = abs.toString();
-            currentSourceDir = abs.getParent();
-            if (currentSourceDir != null) sourceDirStack.push(currentSourceDir);
-            String text = java.nio.file.Files.readString(abs);
-            assembleChunk(text);
-            return this.finish();
-        } catch (IOException e) {
-            this.fatal("Cannot read file: " + file + " (" + e.getMessage() + ")");
-            return this.finish();
-        } finally {
-            if (!sourceDirStack.isEmpty()) sourceDirStack.pop();
-            currentSourceDir = prev;
-            currentSourceName = prevName;
-        }
+    // Keep this even if you don't use rich diagnostics yet (safe no-op).
+    private void cacheSourceText(String sourceName, String text) {
+        // If you later re-enable rich diagnostics, you can store `text` here
+        // in a Map<String, List<String>>. For now, no-op is fine.
     }
 
     private void assembleChunk(String text) {
+        if (text == null) return;
+
         String[] lines = text.split("\n", -1);
         for (int i = 0; i < lines.length && !this.aborted; i++) {
             try {
@@ -2289,6 +2504,7 @@ public class Assembler {
             }
         }
 
+        // If someone forgets .endm, fail clearly
         if (macroDefActive && !this.aborted) {
             fatal("Unterminated .macro \"" + macroDefName + "\" (missing .endm)");
             macroDefActive = false;
@@ -2297,6 +2513,130 @@ public class Assembler {
             macroDefParams = null;
             macroDefBody = null;
         }
+    }
+
+    public AssemblerState assembleFile(String text) {
+        if (relaxEnabled && relaxDriver) {
+            return assembleWithRelaxText(text);
+        }
+        return assembleOnceText(text);
+    }
+
+    public AssemblerState assemblePath(Path file) {
+        if (relaxEnabled && relaxDriver) {
+            return assembleWithRelaxPath(file);
+        }
+        return assembleOncePath(file);
+    }
+
+    private AssemblerState assembleOnceText(String text) {
+        assembleChunk(text);
+        return this.finish();
+    }
+
+    private AssemblerState assembleOncePath(Path file) {
+        Path prev = currentSourceDir;
+        String prevName = currentSourceName;
+        String prevKey  = currentSourceKey;
+        try {
+            Path abs = file.toAbsolutePath().normalize();
+            currentSourceName = abs.toString();
+            currentSourceKey  = abs.toString();
+            currentSourceDir = abs.getParent();
+            if (currentSourceDir != null) sourceDirStack.push(currentSourceDir);
+            String text = Files.readString(abs);
+            cacheSourceText(currentSourceName, text);
+            assembleChunk(text);
+            return this.finish();
+        } catch (IOException e) {
+            this.fatal("Cannot read file: " + file + " (" + e.getMessage() + ")");
+            return this.finish();
+        } finally {
+            if (!sourceDirStack.isEmpty()) sourceDirStack.pop();
+            currentSourceDir = prev;
+            currentSourceName = prevName;
+            currentSourceKey  = prevKey;
+        }
+    }
+
+    private Assembler cloneForRelaxPass(Map<RelaxSite, RelaxLevel> plan) {
+        Assembler a = new Assembler(this.spec);
+        // carry config
+        a.includeSearchPaths.addAll(this.includeSearchPaths);
+        a.maxIncludeDepth = this.maxIncludeDepth;
+        // carry arch/width defines are created by .arch in source; but width define exists by default too.
+        a.relaxEnabled = true;
+        a.relaxDriver = false; // do NOT recurse into relax loop
+        a.relaxPlan = (plan == null) ? new HashMap<>() : new HashMap<>(plan);
+        a.relaxRequests = new HashMap<>();
+        return a;
+    }
+
+    private AssemblerState assembleWithRelaxText(String text) {
+        Map<RelaxSite, RelaxLevel> plan = new HashMap<>(this.relaxPlan);
+
+        AssemblerState last = null;
+        for (int pass = 0; pass < relaxMaxPasses; pass++) {
+            Assembler a = cloneForRelaxPass(plan);
+            AssemblerState st = a.assembleOnceText(text);
+            last = st;
+
+            // If there are real errors (not relaxable), stop.
+            if (a.aborted) return st;
+
+            boolean changed = false;
+            for (var e : a.relaxRequests.entrySet()) {
+                RelaxSite site = e.getKey();
+                RelaxLevel req = e.getValue();
+                RelaxLevel cur = plan.get(site);
+                RelaxLevel upd = maxRelax(cur, req);
+                if (upd != cur) {
+                    plan.put(site, upd);
+                    changed = true;
+                }
+            }
+
+            if (!changed) return st;
+        }
+
+        // didn't converge
+        if (last != null) {
+            // best-effort warning (non-fatal)
+            last.errors.add(new AssemblerError("Relaxation did not converge within " + relaxMaxPasses + " passes", 1, 1, currentSourceName));
+        }
+        return last;
+    }
+
+    private AssemblerState assembleWithRelaxPath(Path file) {
+        Map<RelaxSite, RelaxLevel> plan = new HashMap<>(this.relaxPlan);
+
+        AssemblerState last = null;
+        for (int pass = 0; pass < relaxMaxPasses; pass++) {
+            Assembler a = cloneForRelaxPass(plan);
+            AssemblerState st = a.assembleOncePath(file);
+            last = st;
+
+            if (a.aborted) return st;
+
+            boolean changed = false;
+            for (var e : a.relaxRequests.entrySet()) {
+                RelaxSite site = e.getKey();
+                RelaxLevel req = e.getValue();
+                RelaxLevel cur = plan.get(site);
+                RelaxLevel upd = maxRelax(cur, req);
+                if (upd != cur) {
+                    plan.put(site, upd);
+                    changed = true;
+                }
+            }
+
+            if (!changed) return st;
+        }
+
+        if (last != null) {
+            last.errors.add(new AssemblerError("Relaxation did not converge within " + relaxMaxPasses + " passes", 1, 1, currentSourceName));
+        }
+        return last;
     }
 
     public AssemblerState state() {
@@ -2335,40 +2675,40 @@ public class Assembler {
 
     public String loadInclude(String path) {
         path = unquote(path);
-        return loadAndAssembleExternalText(path, java.util.List.of("", "include/"));
+        return loadAndAssembleExternalText(path, List.of("", "include/"));
     }
 
     public String loadModule(String path) {
         path = unquote(path);
         // Currently "module" is treated like "include" (plain text).
-        return loadAndAssembleExternalText(path, java.util.List.of("", "modules/", "include/"));
+        return loadAndAssembleExternalText(path, List.of("", "modules/", "include/"));
     }
 
-    private String loadAndAssembleExternalText(String ref, java.util.List<String> resourcePrefixes) {
+    private String loadAndAssembleExternalText(String ref, List<String> resourcePrefixes) {
         if (ref == null || ref.isBlank()) return "Empty path";
         ref = ref.trim();
 
         // 1) Filesystem (relative to current source dir, include search paths, then CWD)
-        java.nio.file.Path file = null;
+        Path file = null;
         try {
-            java.nio.file.Path p = java.nio.file.Path.of(ref);
+            Path p = Path.of(ref);
 
-            java.util.List<java.nio.file.Path> probes = new java.util.ArrayList<>();
+            List<Path> probes = new ArrayList<>();
             if (!p.isAbsolute()) {
                 if (currentSourceDir != null) probes.add(currentSourceDir.resolve(p));
-                for (java.nio.file.Path inc : includeSearchPaths) {
+                for (Path inc : includeSearchPaths) {
                     if (inc == null) continue;
-                    java.nio.file.Path base = inc;
+                    Path base = inc;
                     if (!base.isAbsolute() && currentSourceDir != null) base = currentSourceDir.resolve(base);
                     probes.add(base.resolve(p));
                 }
             }
             probes.add(p);
 
-            for (java.nio.file.Path cand : probes) {
+            for (Path cand : probes) {
                 try {
-                    java.nio.file.Path c = cand.normalize();
-                    if (java.nio.file.Files.exists(c)) {
+                    Path c = cand.normalize();
+                    if (Files.exists(c)) {
                         file = c.toAbsolutePath().normalize();
                         break;
                     }
@@ -2387,34 +2727,42 @@ public class Assembler {
         if (includeStack.size() >= maxIncludeDepth)
             return "Include depth exceeded (" + maxIncludeDepth + "): " + resolvedKey;
 
+        // .once include-guard: if this source declared .once previously, skip re-including it.
+        if (onceSources.contains(resolvedKey)) {
+            return null;
+        }
+
         includeStack.push(resolvedKey);
 
         String text = null;
         String err = null;
 
-        java.nio.file.Path prev = currentSourceDir;
+        Path prev = currentSourceDir;
         String prevName = currentSourceName;
+        String prevKey  = currentSourceKey;
 
         try {
             if (file != null) {
                 try {
-                    text = java.nio.file.Files.readString(file);
+                    text = Files.readString(file);
                     currentSourceDir = file.getParent();
                     if (currentSourceDir != null) sourceDirStack.push(currentSourceDir);
                     currentSourceName = file.toString();
+                    currentSourceKey  = resolvedKey;
                 } catch (IOException e) {
                     err = "Cannot read: " + file + " (" + e.getMessage() + ")";
                 }
             } else {
                 // 2) Classpath
                 currentSourceName = ref;
+                currentSourceKey  = resolvedKey;
                 ClassLoader cl = getClass().getClassLoader();
                 for (String prefix : resourcePrefixes) {
                     String res = (prefix == null ? "" : prefix) + ref;
                     String clPath = res.startsWith("/") ? res.substring(1) : res;
                     try (InputStream in = cl.getResourceAsStream(clPath)) {
                         if (in == null) continue;
-                        text = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                        text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
                         break;
                     } catch (IOException ignore) {
                         // try next
@@ -2430,6 +2778,7 @@ public class Assembler {
             if (!sourceDirStack.isEmpty()) sourceDirStack.pop();
             currentSourceDir = prev;
             currentSourceName = prevName;
+            currentSourceKey  = prevKey;
             if (!includeStack.isEmpty()) includeStack.pop();
         }
     }
@@ -2443,32 +2792,32 @@ public class Assembler {
         return t;
     }
 
-    private byte[] loadExternalBinary(String ref, java.util.List<String> resourcePrefixes) {
+    private byte[] loadExternalBinary(String ref, List<String> resourcePrefixes) {
         if (ref == null || ref.isBlank()) return null;
         ref = ref.trim();
 
         // 1) Filesystem (relative to current source dir, include search paths, then CWD)
-        java.nio.file.Path file = null;
+        Path file = null;
         try {
-            java.nio.file.Path p = java.nio.file.Path.of(ref);
+            Path p = Path.of(ref);
 
-            java.util.List<java.nio.file.Path> probes = new java.util.ArrayList<>();
+            List<Path> probes = new ArrayList<>();
             if (!p.isAbsolute()) {
                 if (currentSourceDir != null) probes.add(currentSourceDir.resolve(p));
 
-                for (java.nio.file.Path inc : includeSearchPaths) {
+                for (Path inc : includeSearchPaths) {
                     if (inc == null) continue;
-                    java.nio.file.Path base = inc;
+                    Path base = inc;
                     if (!base.isAbsolute() && currentSourceDir != null) base = currentSourceDir.resolve(base);
                     probes.add(base.resolve(p));
                 }
             }
             probes.add(p);
 
-            for (java.nio.file.Path cand : probes) {
+            for (Path cand : probes) {
                 try {
-                    java.nio.file.Path c = cand.normalize();
-                    if (java.nio.file.Files.exists(c)) {
+                    Path c = cand.normalize();
+                    if (Files.exists(c)) {
                         file = c.toAbsolutePath().normalize();
                         break;
                     }
@@ -2482,7 +2831,7 @@ public class Assembler {
 
         try {
             if (file != null) {
-                return java.nio.file.Files.readAllBytes(file);
+                return Files.readAllBytes(file);
             }
 
             // 2) Classpath
@@ -2864,6 +3213,16 @@ public class Assembler {
         public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
                                 int line, int charPositionInLine, String msg, RecognitionException e) {
             errors.add(new SyntaxIssue(line, charPositionInLine, msg));
+        }
+    }
+
+    private AssemblerInstruction assembleAtNoRelax(String line, String sourceName, int lineNo) {
+        boolean prevRelax = this.relaxEnabled;
+        try {
+            this.relaxEnabled = false;
+            return assembleAt(line, sourceName, lineNo);
+        } finally {
+            this.relaxEnabled = prevRelax;
         }
     }
 }

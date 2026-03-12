@@ -27,9 +27,7 @@ stmt_print_i16:
   beq .Lpi_pos
 
   ; print '-'
-  u 45
-  stl w0
-  CALL bios_putc
+  LIB_PUTC_IMM 45
 
   ; value = -value
   ldl w2
@@ -39,7 +37,7 @@ stmt_print_i16:
 .Lpi_pos:
   ldl w2
   stl w0
-  CALL bios_print_u16
+  LIB_PRINT_U16_W0
 
   ldl w14
   jr
@@ -430,10 +428,8 @@ stmt_try_if:
   j .Lif_syntax
 
 .Lif_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
 
   ; If we are RUNning, abort RUN on syntax error
   i SYS_RUNNING
@@ -831,7 +827,7 @@ stmt_try_cls:
   ldl w14
   jr
 .Lcls_ok:
-  CALL bios_cls
+  LIB_CLS
   i1
   stl w0
   ldl w14
@@ -891,10 +887,8 @@ stmt_try_help:
   ldl w14
   jr
 .Lhelp_ok:
-  i help_text
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM help_text
+  LIB_CRLF
   i1
   stl w0
   ldl w14
@@ -1013,10 +1007,8 @@ stmt_try_let:
   jr
 
 .Llet_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
 
   ; If we are RUNning, abort RUN on syntax error
   i SYS_RUNNING
@@ -1131,7 +1123,7 @@ stmt_try_print:
 
   ; print signed
   CALL stmt_print_i16
-  CALL bios_crlf
+  LIB_CRLF
 
   i1
   stl w0
@@ -1154,7 +1146,7 @@ stmt_try_print:
   u 34
   beq .Lpr_done
 
-  CALL bios_putc
+  LIB_PUTC_W0
 
   ldl w10
   inc
@@ -1162,17 +1154,15 @@ stmt_try_print:
   bra .Lpr_str_loop
 
 .Lpr_done:
-  CALL bios_crlf
+  LIB_CRLF
   i1
   stl w0
   ldl w14
   jr
 
 .Lpr_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
 
   ; If we are RUNning, abort RUN on syntax error
   i SYS_RUNNING
@@ -1334,18 +1324,9 @@ stmt_try_input:
   stl w7              ; len
 
   ; prompt "? "
-  u 63
-  stl w0
-  CALL bios_putc
-  u 32
-  stl w0
-  CALL bios_putc
-
-  i LINE_BUF
-  stl w0
-  i LINE_MAX
-  stl w1
-  CALL bios_kbd_readline
+  LIB_PUTC_IMM 63
+  LIB_PUTC_IMM 32
+  LIB_READLINE_IMM LINE_BUF, LINE_MAX
 
   i LINE_BUF
   stl w10
@@ -1372,10 +1353,8 @@ stmt_try_input:
   jr
 
 .Lin_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -1537,10 +1516,8 @@ stmt_try_gosub:
   jr
 
 .Lgs_ovf:
-  i gosub_ovf
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM gosub_ovf
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -1550,10 +1527,8 @@ stmt_try_gosub:
   jr
 
 .Lgs_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -1628,7 +1603,7 @@ stmt_try_return:
   CALL tok_to_upper
   ldl w0
   u 78
-  bne .Lrt_no
+  bnefar .Lrt_no
 
   ; consume N
   ldl w10
@@ -1690,10 +1665,8 @@ stmt_try_return:
   jr
 
 .Lrt_uf:
-  i ret_uf
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM ret_uf
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -1703,10 +1676,8 @@ stmt_try_return:
   jr
 
 .Lrt_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -2013,10 +1984,8 @@ stmt_try_for:
   jr
 
 .Lfor_ovf:
-  i for_ovf
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM for_ovf
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -2026,10 +1995,8 @@ stmt_try_for:
   jr
 
 .Lfor_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -2276,10 +2243,8 @@ stmt_try_next:
   jr
 
 .Lnxt_uf:
-  i nxt_uf
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM nxt_uf
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb
@@ -2289,10 +2254,8 @@ stmt_try_next:
   jr
 
 .Lnxt_syntax:
-  i err_syntax
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM err_syntax
+  LIB_CRLF
   i SYS_END_PEND
   u 1
   sb

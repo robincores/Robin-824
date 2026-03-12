@@ -286,11 +286,8 @@ prog_store_line:
   ldl w6
   i PROG_LIMIT
   bltu .Lps_mem_ok
-
-  i oom_msg
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM oom_msg
+  LIB_CRLF
   bra .Lps_done
 
 .Lps_mem_ok:
@@ -365,6 +362,12 @@ oom_msg:
 
 ; ------------------------------------------------------------
 ; prog_list()
+; Safe version: uses stored record length, not NUL scan.
+; Record format:
+;   +0 line low
+;   +1 line high (bit7=deleted)
+;   +2 text length INCLUDING trailing NUL
+;   +3 text bytes...
 ; ------------------------------------------------------------
 prog_list:
   stl w14
@@ -383,27 +386,45 @@ prog_list:
   bra .Lpl_exit
 
 .Lpl_body:
+  ; w12 = record text length INCLUDING trailing NUL
   ldl w10
   u 2
   add
   lu
   stl w12
 
+  ; Corrupt/empty record guard
+  ldl w12
+  i0
+  beq .Lpl_exit
+
+  ; Precompute next record pointer: w9 = w10 + 3 + w12
+  ldl w10
+  u 3
+  add
+  ldl w12
+  add
+  stl w9
+
+  ; Read line number header
   ldl w10
   lu
   stl w1
+
   ldl w10
   i1
   add
   lu
   stl w2
 
+  ; Skip deleted line if bit7 set
   ldl w2
   u 0x80
   and
   i0
   bne .Lpl_next
 
+  ; Reconstruct line number into w0
   ldl w2
   u 0x7F
   and
@@ -415,39 +436,46 @@ prog_list:
   ldl w1
   add
   stl w0
-  CALL bios_print_u16
 
-  u 32
-  stl w0
-  CALL bios_putc
+  LIB_PRINT_U16_W0
+  LIB_PUTC_IMM 32
 
+  ; Printable text length = stored length - 1 (exclude trailing NUL)
+  ldl w12
+  i1
+  sub
+  stl w6
+
+  ; w13 = start of text
   ldl w10
   u 3
   add
   stl w13
 
 .Lpl_txt:
+  ldl w6
+  i0
+  beq .Lpl_eol
+
   ldl w13
   lu
   stl w0
-  ldl w0
-  i0
-  beq .Lpl_eol
-  CALL bios_putc
+  LIB_PUTC_W0
+
   ldl w13
   inc
   stl w13
+
+  ldl w6
+  dec
+  stl w6
   bra .Lpl_txt
 
 .Lpl_eol:
-  CALL bios_crlf
+  LIB_CRLF
 
 .Lpl_next:
-  ldl w10
-  u 3
-  add
-  ldl w12
-  add
+  ldl w9
   stl w10
   bra .Lpl_loop
 
@@ -535,10 +563,8 @@ prog_run_from_line:
   jr
 
 .Lrfl_nf:
-  i undef_msg
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM undef_msg
+  LIB_CRLF
   ldl w14
   jr
 
@@ -586,10 +612,8 @@ prog_run_loop:
   ldl w10
   ldl w13
   bltu .Lrl_np_ok
-  i bad_prog_msg
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM bad_prog_msg
+  LIB_CRLF
   j .Lrl_exit
 .Lrl_np_ok:
 
@@ -714,10 +738,8 @@ prog_run_loop:
   j .Lrl_loop
 
 .Lrl_goto_nf:
-  i undef_msg
-  stl w0
-  CALL bios_puts_z
-  CALL bios_crlf
+  LIB_PUTS_Z_IMM undef_msg
+  LIB_CRLF
   bra .Lrl_exit
 
 .Lrl_adv:

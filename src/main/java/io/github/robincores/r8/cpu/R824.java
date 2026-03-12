@@ -8,11 +8,26 @@ import java.io.InputStreamReader;
 
 public final class R824 extends R8Core {
 
-    public R824(Bus bus) {
-        super(bus, 0xFF_FFFF, 3, 0xFF_FFFF, 0x80_0000);
+    public static Config.Builder config() {
+        return Config.builder(0xFF_FFFF, 3, 0xFF_FFFF, 0x80_0000);
     }
 
-    // ---
+    public R824(Bus bus) {
+        this(bus, config().build());
+    }
+
+    public R824(Bus bus, Config cfg) {
+        super(bus, cfg);
+    }
+
+    public R824(Bus bus, boolean hasR8Blk) {
+        this(bus, config().hasR8Blk(hasR8Blk).build());
+    }
+
+    public R824(Bus bus, boolean hasR8Blk, MicroFusionMode microFusionMode) {
+        this(bus, config().hasR8Blk(hasR8Blk).microFusionMode(microFusionMode).build());
+    }
+// ---
 
     private static final int EXIT = 0x00;
     private static final int REGISTER_DUMP = 0x01;

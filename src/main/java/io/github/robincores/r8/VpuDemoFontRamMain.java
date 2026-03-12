@@ -3,7 +3,8 @@ package io.github.robincores.r8;
 import io.github.robincores.r8.bus.BusMap;
 import io.github.robincores.r8.cpu.R816;
 import io.github.robincores.r8.device.DisplayConfig;
-import io.github.robincores.r8.device.VPU;
+import io.github.robincores.r8.device.VPU_v2;
+import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
@@ -18,10 +19,20 @@ import static io.github.robincores.r8.cpu.R8Core.EXTERNAL_INTERRUPT_MASK;
 /**
  * Manual VPU demo exercising FONT RAM writes (custom glyph upload).
  *
+ * Updated for:
+ * - Mode 4 removed (REG_MODE is 0..3 only)
+ * - Text is ONLY via MMIO overlay personality (Text Buffer + Font RAM)
+ * - New MMIO memory map:
+ *   - OAM:   0x0300–0x06FF (not used here)
+ *   - Copper 0x1000–0x1FFF
+ *   - Text:  0x2000–0x2F9F (80×25×2)
+ *   - Font:  0x3000–0x3FFF (8×16×256)
+ *   - Overlay personality select: REG_OVL_MODE (0x001F), bit0: 0=text, 1=tiles
+ *
  * Notes:
- * - The emulation loop runs on a background thread (DO NOT block the JavaFX Application Thread),
- *   because VPU.requestBlit() uses Platform.runLater().
- * - If you run as a JPMS module (-m ...), ensure your module-info exports/opens io.github.robincores.r8 to javafx.graphics.
+ * - The emulation loop runs on a background thread (DO NOT block the JavaFX Application Thread).
+ * - VPU requires calling vpu.fxPulse() on the JavaFX thread to present updates (pull-based blit).
+ *   We do that using an AnimationTimer.
  */
 public final class VpuDemoFontRamMain extends Application {
 
@@ -37,6 +48,23 @@ public final class VpuDemoFontRamMain extends Application {
     private Thread emuThread;
     private Stage stage;
 
+    private AnimationTimer fxTimer;
+
+    // --- New MMIO addresses (final spec) ---
+    private static final int REG_MODE     = 0x0002; // 0..3
+    private static final int REG_TX_CTRL  = 0x0007; // bit0 TX_EN
+    private static final int REG_OVL_MODE = 0x001F; // bit0: 0=text, 1=sprites/tiles
+
+    private static final int TEXT_COLS = 80;
+    private static final int TEXT_ROWS = 25;
+
+    private static final int TEXT_BASE = 0x2000; // 80×25×2 = 4000 bytes
+    private static final int FONT_BASE = 0x3000; // 4096 bytes (8×16×256)
+
+    // TX_CTRL bits (keep in sync with VPU)
+    private static final int TX_EN = 0x01;
+    // If you later want cursor etc, add those bits here.
+
     @Override
     public void start(Stage stage) {
         this.stage = stage;
@@ -45,16 +73,20 @@ public final class VpuDemoFontRamMain extends Application {
         StackPane root = new StackPane(canvas);
 
         Scene scene = new Scene(root, DISPLAY_CONFIG.canvasWidth(), DISPLAY_CONFIG.canvasHeight());
-        stage.setTitle("VpuDemoFontRamMain");
+        stage.setTitle("VpuDemoFontRamMain (new MMIO map, no Mode 4)");
         stage.setScene(scene);
         stage.setResizable(true);
         stage.show();
 
-        // Minimal CPU/sink wiring (VPU uses InterruptSink only for vblank IRQ).
         BusMap bus = new BusMap(0xFFFF);
         R816 cpu = new R816(bus);
 
-        VPU vpu = new VPU(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
+        VPU_v2 vpu = new VPU_v2(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
+
+        fxTimer = new AnimationTimer() {
+            @Override public void handle(long now) { vpu.fxPulse(); }
+        };
+        fxTimer.start();
 
         final int cyclesPerFrame =
                 DISPLAY_CONFIG.cyclesPerScanline() * DISPLAY_CONFIG.scanlinesPerFrame();
@@ -66,23 +98,29 @@ public final class VpuDemoFontRamMain extends Application {
         stage.setOnCloseRequest(e -> running.set(false));
     }
 
-    private void runDemo(VPU vpu, int cyclesPerFrame) {
+    private void runDemo(VPU_v2 vpu, int cyclesPerFrame) {
+        // Select TEXT overlay personality explicitly.
+        // REG_OVL_MODE bit0: 0=text, 1=tiles
+        vpu.writeMmio(REG_OVL_MODE, (byte) 0x00);
 
-// Mode 4: text-only so the font is easy to see.
-        vpu.writeMmio(0x0002, (byte) 4);
+        // Choose any graphics mode 0..3. Background VRAM defaults to 0 so you get a black backdrop.
+        vpu.writeMmio(REG_MODE, (byte) 1); // MODE 1 is a nice default (320×200 4bpp scaled)
 
-// Upload a custom glyph into FONT RAM (8x16).
-// FONT_BASE = 0x1400, glyph rows are at: FONT_BASE + (ch<<4) + row
+        // Enable text overlay (now the ONLY way to show text; no Mode 4 exists).
+        vpu.writeMmio(REG_TX_CTRL, (byte) (TX_EN));
+
+        // Upload a custom glyph into FONT RAM (8×16).
         int ch = '@'; // overwrite '@' so it's easy to type/see
         uploadCustomGlyph(vpu, ch);
 
-// Header
+        // Header
         writeText(vpu, 0, 0, "FONT RAM demo — custom '@' glyph uploaded at runtime", 0x0F, 0x01);
         writeText(vpu, 0, 1, "If you see a smiley/face made of pixels, FONT RAM writes work.", 0x0E, 0x01);
+        writeText(vpu, 0, 2, "Text lives at 0x2000; Font lives at 0x3000 (new MMIO map).", 0x0B, 0x01);
 
-// Fill screen with '@'
+        // Fill screen with '@'
         for (int y = 4; y < 22; y++) {
-            for (int x = 0; x < 80; x++) {
+            for (int x = 0; x < TEXT_COLS; x++) {
                 putChar(vpu, x, y, (char) ch, 0x0E, 0x00);
             }
         }
@@ -92,33 +130,43 @@ public final class VpuDemoFontRamMain extends Application {
             // Animate colors (swap fg colors every few frames)
             int fg = 1 + ((frame >> 3) & 0x0F);
             for (int y = 4; y < 22; y++) {
-                for (int x = 0; x < 80; x++) {
+                for (int x = 0; x < TEXT_COLS; x++) {
                     putChar(vpu, x, y, (char) ch, fg, 0x00);
                 }
             }
 
+            // Run roughly one frame worth of VPU time
             int chunk = 5_000;
             for (int done = 0; done < cyclesPerFrame; done += chunk) vpu.tick(chunk);
 
             frame++;
-            try { Thread.sleep(60); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            try { Thread.sleep(60); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
         }
 
         Platform.runLater(() -> { if (stage != null) stage.close(); });
-
     }
 
-
-    private static void putChar(VPU vpu, int x, int y, char ch, int fg, int bg) {
+    private static void putChar(VPU_v2 vpu, int x, int y, char ch, int fg, int bg) {
         int attr = ((bg & 0x0F) << 4) | (fg & 0x0F);
-        int cols = 80;
-        int o = 0x0300 + (y * cols + x) * 2;
+        int o = TEXT_BASE + ((y * TEXT_COLS + x) * 2);
         vpu.writeMmio(o, (byte) (ch & 0xFF));
         vpu.writeMmio(o + 1, (byte) attr);
     }
 
-    private static void uploadCustomGlyph(VPU vpu, int ch) {
-        // A simple 8x16 "face" pattern.
+    private static void writeText(VPU_v2 vpu, int x, int y, String s, int fg, int bg) {
+        int attr = ((bg & 0x0F) << 4) | (fg & 0x0F);
+        int base = TEXT_BASE + ((y * TEXT_COLS + x) * 2);
+        int n = Math.min(s.length(), TEXT_COLS - x);
+        for (int i = 0; i < n; i++) {
+            int o = base + (i * 2);
+            vpu.writeMmio(o, (byte) (s.charAt(i) & 0xFF));
+            vpu.writeMmio(o + 1, (byte) attr);
+        }
+    }
+
+    private static void uploadCustomGlyph(VPU_v2 vpu, int ch) {
+        // A simple 8×16 "face" pattern.
         // Each byte is 8 pixels, bit7 is leftmost.
         int[] rows = new int[] {
                 0b00111100,
@@ -139,36 +187,24 @@ public final class VpuDemoFontRamMain extends Application {
                 0b00111100
         };
 
-        int base = 0x1400 + ((ch & 0xFF) << 4);
+        int base = FONT_BASE + ((ch & 0xFF) << 4);
         for (int r = 0; r < 16; r++) {
             vpu.writeMmio(base + r, (byte) (rows[r] & 0xFF));
         }
     }
 
-
-
-    private static void writeText(VPU vpu, int x, int y, String s, int fg, int bg) {
-        // TEXT_BASE = 0x0300, 80x25, 2 bytes per cell: [ch, attr], attr=(bg<<4)|fg
-        int attr = ((bg & 0x0F) << 4) | (fg & 0x0F);
-        int cols = 80;
-        int base = 0x0300 + (y * cols + x) * 2;
-        for (int i = 0; i < s.length(); i++) {
-            int o = base + (i * 2);
-            vpu.writeMmio(o, (byte) (s.charAt(i) & 0xFF));
-            vpu.writeMmio(o + 1, (byte) attr);
-        }
-    }
-
-
     @Override
     public void stop() {
         running.set(false);
+
+        if (fxTimer != null) {
+            fxTimer.stop();
+            fxTimer = null;
+        }
+
         if (emuThread != null) {
-            try {
-                emuThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            try { emuThread.join(500); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 

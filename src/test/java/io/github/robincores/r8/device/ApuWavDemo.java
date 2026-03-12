@@ -5,6 +5,7 @@ import java.io.*;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * WAV -> APU PCM streaming demo.
@@ -23,7 +24,7 @@ import java.nio.file.Path;
 public final class ApuWavDemo {
 
     // --- CPU/APU pacing ---
-    private static final long CPU_HZ = 12_500_000L;
+    private static final long CPU_HZ = 12_572_000L;
 
     // --- Streaming buffer (must fit in your RAM) ---
     private static final int RAM_SIZE = 0x10000; // 64K for demo
@@ -141,10 +142,25 @@ public final class ApuWavDemo {
 
     private static void waitChunkDone(APU apu, int voice) {
         int base = 0x40 + voice * 0x10;
+
+        long startNs = System.nanoTime();
+        long emuCycles = 0;
+
         for (;;) {
             int st = read8(apu, base + 0xE);
             if ((st & 0x02) != 0) break; // END
-            apu.tick(100_000); // advance emulation time
+
+            // Advance a small chunk of emulated time
+            int step = 50_000;
+            apu.tick(step);
+            emuCycles += step;
+
+            // Real-time pacing to preserve “fixed clock machine” behavior
+            long targetNs = startNs + (emuCycles * 1_000_000_000L) / CPU_HZ;
+            long sleepNs = targetNs - System.nanoTime();
+            if (sleepNs > 0) {
+                LockSupport.parkNanos(sleepNs);
+            }
         }
 
         // clear END flag (optional)

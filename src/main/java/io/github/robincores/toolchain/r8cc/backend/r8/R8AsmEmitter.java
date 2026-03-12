@@ -30,9 +30,12 @@ public final class R8AsmEmitter {
                     case IrInstr.Un x -> d.un(x.op());
                     case IrInstr.Call x -> d.call(x.name(), x.argc());
                     case IrInstr.Ret __ -> d.ret();
-                    case IrInstr.LoadLocal x  -> d.loadLocal(x.wk());
+                    case IrInstr.LoadLocal x -> d.loadLocal(x.wk());
                     case IrInstr.StoreLocal x -> d.storeLocal(x.wk());
-                    case IrInstr.Pop1 __      -> d.pop1();
+                    case IrInstr.Pop1 __ -> d.pop1();
+                    case IrInstr.Label x -> d.label(x.name());
+                    case IrInstr.Jmp x -> d.jmp(x.target());
+                    case IrInstr.BrIfZero x -> d.brIfZero(x.target());
                 };
 
                 if (out == null || out.isBlank()) continue;

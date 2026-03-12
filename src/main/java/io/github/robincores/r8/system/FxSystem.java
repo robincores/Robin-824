@@ -26,4 +26,12 @@ public interface FxSystem extends R8System {
             if (newS != null) attach(newS);
         });
     }
+
+    /**
+     * Called on the JavaFX Application Thread once per JavaFX pulse (typically ~60Hz).
+     * Systems with video output should present the latest completed frame here.
+     *
+     * <p>Default is no-op.</p>
+     */
+    default void fxPulse() { }
 }

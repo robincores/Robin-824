@@ -3,7 +3,8 @@ package io.github.robincores.r8;
 import io.github.robincores.r8.bus.BusMap;
 import io.github.robincores.r8.cpu.R816;
 import io.github.robincores.r8.device.DisplayConfig;
-import io.github.robincores.r8.device.VPU;
+import io.github.robincores.r8.device.VPU_v2;
+import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
@@ -17,6 +18,19 @@ import static io.github.robincores.r8.cpu.R8Core.EXTERNAL_INTERRUPT_MASK;
 
 /**
  * Demo: MODE 3 (160x200 Mode-X-ish 8bpp) scaled to 640x400.
+ *
+ * Updated for:
+ * - Mode 4 removed (REG_MODE is 0..3 only)
+ * - Text exists ONLY via MMIO overlay personality (Text Buffer + Font RAM)
+ * - New MMIO memory map:
+ *     Text:   0x2000–0x2F9F
+ *     Font:   0x3000–0x3FFF
+ *     Overlay select: REG_OVL_MODE (0x001F) bit0: 0=text, 1=tiles
+ *
+ * Notes:
+ * - Emulation runs on a background thread.
+ * - VPU requires calling vpu.fxPulse() on the JavaFX thread to present updates (pull-based blit).
+ *   We do that using an AnimationTimer.
  *
  * Improvements:
  *  - Smooth 240-color cyclic palette (keeps 0..15 VGA-ish for readable text)
@@ -39,12 +53,13 @@ public final class VpuDemoMode3Main extends Application {
     private static final int REG_FB_BASE_L  = 0x0005;
     private static final int REG_FB_BASE_H  = 0x0006;
     private static final int REG_TX_CTRL    = 0x0007;
+    private static final int REG_OVL_MODE   = 0x001F; // bit0: 0=text personality, 1=sprite/tile personality
 
     // Palette MMIO
     private static final int PAL_BASE       = 0x0100;
 
-    // Text RAM MMIO
-    private static final int TEXT_BASE      = 0x0300;
+    // Text RAM MMIO (new map)
+    private static final int TEXT_BASE      = 0x2000;
     private static final int TEXT_COLS      = 80;
 
     // TX_CTRL bits
@@ -55,8 +70,10 @@ public final class VpuDemoMode3Main extends Application {
     private Thread emuThread;
     private Stage stage;
 
-    // ---- LUTs ----
+    // FX-thread present pulse
+    private AnimationTimer fxTimer;
 
+    // ---- LUTs ----
     private static final int[] SIN8 = new int[256];   // 0..255
     private static final int[] MAP240 = new int[256]; // 0..239
 
@@ -78,14 +95,20 @@ public final class VpuDemoMode3Main extends Application {
         StackPane root = new StackPane(canvas);
 
         Scene scene = new Scene(root, DISPLAY_CONFIG.canvasWidth(), DISPLAY_CONFIG.canvasHeight());
-        stage.setTitle("VPU Demo: MODE 3 (160x200 8bpp Mode-X) — plasma + smooth palette");
+        stage.setTitle("VPU Demo: MODE 3 (160x200 8bpp Mode-X) — plasma + smooth palette (new MMIO map)");
         stage.setScene(scene);
         stage.setResizable(true);
         stage.show();
 
         BusMap bus = new BusMap(0xFFFF);
         R816 cpu = new R816(bus);
-        VPU vpu = new VPU(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
+        VPU_v2 vpu = new VPU_v2(DISPLAY_CONFIG, cpu, EXTERNAL_INTERRUPT_MASK, canvas);
+
+        // Drive VPU present on the JavaFX thread
+        fxTimer = new AnimationTimer() {
+            @Override public void handle(long now) { vpu.fxPulse(); }
+        };
+        fxTimer.start();
 
         final int cyclesPerFrame = DISPLAY_CONFIG.cyclesPerScanline() * DISPLAY_CONFIG.scanlinesPerFrame();
 
@@ -96,7 +119,10 @@ public final class VpuDemoMode3Main extends Application {
         stage.setOnCloseRequest(e -> running.set(false));
     }
 
-    private void runDemo(VPU vpu, int cyclesPerFrame) {
+    private void runDemo(VPU_v2 vpu, int cyclesPerFrame) {
+        // Select TEXT overlay personality explicitly.
+        vpu.writeMmio(REG_OVL_MODE, (byte) 0x00);
+
         // MODE 3: 160x200, 8bpp across 4 byte-planes, scaled to 640x400
         vpu.writeMmio(REG_MODE, (byte) 3);
 
@@ -108,10 +134,10 @@ public final class VpuDemoMode3Main extends Application {
 
         final int srcW = 160;
         final int srcH = 200;
-        final int bpl = srcW / 4; // 40 bytes/line/plane
-        final int pageBytes = srcH * bpl; // 8000 bytes per plane
+        final int bpl = srcW / 4;           // 40 bytes/line/plane
+        final int pageBytes = srcH * bpl;   // 8000 bytes per plane
         final int page0 = 0;
-        final int page1 = pageBytes; // fits in 16K
+        final int page1 = pageBytes;        // fits in 16K
 
         // HUD
         writeText(vpu, 0, 0,
@@ -122,7 +148,8 @@ public final class VpuDemoMode3Main extends Application {
                         bpl, pageBytes, page0, page1),
                 0x0E, 0x00);
         writeText(vpu, 0, 2,
-                "Palette: VGA(0..15) + Smooth(16..255) | Plasma: sin LUT | Page flip | FPS: --", 0x0E, 0x00);
+                "Palette: VGA(0..15) + Smooth(16..255) | Plasma: sin LUT | Page flip | FPS: --",
+                0x0E, 0x00);
 
         // Precompute base phases
         final int[] x3 = new int[srcW];
@@ -213,20 +240,14 @@ public final class VpuDemoMode3Main extends Application {
 
             frame++;
 
-            try {
-                Thread.sleep(14);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
+            try { Thread.sleep(14); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
         }
 
-        Platform.runLater(() -> {
-            if (stage != null) stage.close();
-        });
+        Platform.runLater(() -> { if (stage != null) stage.close(); });
     }
 
-    private static void installPalette(VPU vpu) {
+    private static void installPalette(VPU_v2 vpu) {
         int[] rgb16 = {
                 0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
                 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
@@ -250,7 +271,7 @@ public final class VpuDemoMode3Main extends Application {
         return (v < 0) ? 0 : (Math.min(v, 255));
     }
 
-    private static void writeRgb888ToPal(VPU vpu, int idx, int rgb888) {
+    private static void writeRgb888ToPal(VPU_v2 vpu, int idx, int rgb888) {
         int r = (rgb888 >>> 16) & 0xFF;
         int g = (rgb888 >>> 8) & 0xFF;
         int b = (rgb888) & 0xFF;
@@ -261,7 +282,7 @@ public final class VpuDemoMode3Main extends Application {
         vpu.writeMmio(o + 1, (byte) ((rgb565 >>> 8) & 0xFF));
     }
 
-    private static void writeText(VPU vpu, int x, int y, String s, int fg, int bg) {
+    private static void writeText(VPU_v2 vpu, int x, int y, String s, int fg, int bg) {
         int attr = ((bg & 0x0F) << 4) | (fg & 0x0F);
         int base = TEXT_BASE + (y * TEXT_COLS + x) * 2;
         int n = Math.min(s.length(), TEXT_COLS - x);
@@ -275,12 +296,15 @@ public final class VpuDemoMode3Main extends Application {
     @Override
     public void stop() {
         running.set(false);
+
+        if (fxTimer != null) {
+            fxTimer.stop();
+            fxTimer = null;
+        }
+
         if (emuThread != null) {
-            try {
-                emuThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            try { emuThread.join(500); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 
