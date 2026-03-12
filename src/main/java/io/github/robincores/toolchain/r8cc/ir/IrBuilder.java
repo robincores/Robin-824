@@ -101,6 +101,14 @@ public final class IrBuilder {
                     out.add(new IrInstr.LoadLocal(rv.index));
                     return;
                 }
+                if ("&&".equals(b.op())) {
+                    lowerShortCircuitAnd(b.left(), b.right(), ctx, out);
+                    return;
+                }
+                if ("||".equals(b.op())) {
+                    lowerShortCircuitOr(b.left(), b.right(), ctx, out);
+                    return;
+                }
                 lowerExpr(b.left(), ctx, out);
                 lowerExpr(b.right(), ctx, out);
                 out.add(new IrInstr.Bin(b.op()));
@@ -111,6 +119,43 @@ public final class IrBuilder {
             }
             default -> throw new IllegalArgumentException("Unsupported expr: " + e);
         }
+    }
+
+
+    private void lowerShortCircuitAnd(Expr left, Expr right, Ctx ctx, List<IrInstr> out) {
+        String falseLabel = ctx.newLabel("land_false");
+        String endLabel = ctx.newLabel("land_end");
+
+        lowerExpr(left, ctx, out);
+        out.add(new IrInstr.BrIfZero(falseLabel));
+        lowerExpr(right, ctx, out);
+        out.add(new IrInstr.BrIfZero(falseLabel));
+        out.add(new IrInstr.PushConst(1));
+        out.add(new IrInstr.Jmp(endLabel));
+        out.add(new IrInstr.Label(falseLabel));
+        out.add(new IrInstr.PushConst(0));
+        out.add(new IrInstr.Label(endLabel));
+    }
+
+    private void lowerShortCircuitOr(Expr left, Expr right, Ctx ctx, List<IrInstr> out) {
+        String evalRight = ctx.newLabel("lor_rhs");
+        String falseLabel = ctx.newLabel("lor_false");
+        String endLabel = ctx.newLabel("lor_end");
+
+        lowerExpr(left, ctx, out);
+        out.add(new IrInstr.BrIfZero(evalRight));
+        out.add(new IrInstr.PushConst(1));
+        out.add(new IrInstr.Jmp(endLabel));
+
+        out.add(new IrInstr.Label(evalRight));
+        lowerExpr(right, ctx, out);
+        out.add(new IrInstr.BrIfZero(falseLabel));
+        out.add(new IrInstr.PushConst(1));
+        out.add(new IrInstr.Jmp(endLabel));
+
+        out.add(new IrInstr.Label(falseLabel));
+        out.add(new IrInstr.PushConst(0));
+        out.add(new IrInstr.Label(endLabel));
     }
 
     private enum VarKind { PARAM, LOCAL }
