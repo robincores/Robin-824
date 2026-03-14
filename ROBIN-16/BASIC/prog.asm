@@ -998,29 +998,35 @@ prog_run_loop:
   i0
   bne .Lprl_after_exec
 
-  ; preserve top and nextPtr across detokenize + execution
+  ; execute tokenized payload directly; preserve top across statement execution
   ldl w11
   push
-  ldl w9
-  push
 
-  ; detokenize stored payload into LINE_BUF, then execute that plain-text line
   ldl w10
   u 3
   add
-  stl w0
-  i LINE_BUF
-  stl w1
-  CALL tok_detokenize_line
+  stl w10
+  CALL stmt_dispatch
+  ldl w0
+  i1
+  beq .Lprl_exec_ok
+  CALL stmt_fail_syntax
+.Lprl_exec_ok:
 
-  i LINE_BUF
-  stl w0
-  CALL basic_exec_line
-
-  pop
-  stl w13
   pop
   stl w11
+  i SYS_NEXT_PTR_LO
+  lu
+  stl w1
+  i SYS_NEXT_PTR_HI
+  lu
+  stl w2
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w13
   bra .Lprl_after_tail_setup
 
 .Lprl_after_exec:

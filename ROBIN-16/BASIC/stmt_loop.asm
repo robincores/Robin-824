@@ -80,18 +80,7 @@ stmt_exec_for:
   ldl w4
   sb
 
-  CALL tok_skip_spaces
-  CALL tok_read_ident
-  ldl w1
-  i2
-  bne .Lsef_to_bad
-  ldl w1
-  stl w7
-  i kw_to_local
-  stl w0
-  u 2
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_to_keyword
   ldl w0
   i1
   beq .Lsef_to_ok
@@ -124,17 +113,7 @@ stmt_exec_for:
   i0
   beq .Lsef_step_done
 
-  CALL tok_read_ident
-  ldl w1
-  i0
-  beq .Lsef_step_done_restore
-  ldl w1
-  stl w7
-  i kw_step_local
-  stl w0
-  u 4
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_step_keyword
   ldl w0
   i1
   beq .Lsef_step_kw

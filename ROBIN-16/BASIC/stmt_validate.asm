@@ -10,6 +10,8 @@ stmt_validate_dispatch:
   CALL stmt_parse_kind
   ldl w0
   stl w8
+  ldl w1
+  stl w7
 
   ldl w8
   i STMTK_NONE
@@ -313,18 +315,7 @@ stmt_validate_for:
   ldl w14
   jr
 .Lsvf_start_ok:
-  CALL tok_skip_spaces
-  CALL tok_read_ident
-  ldl w1
-  i2
-  bne .Lsvf_fail
-  ldl w1
-  stl w7
-  i kw_to_local
-  stl w0
-  u 2
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_to_keyword
   ldl w0
   i1
   beq .Lsvf_to_ok
@@ -351,17 +342,7 @@ stmt_validate_for:
   ldl w0
   i0
   beq .Lsvf_done
-  CALL tok_read_ident
-  ldl w1
-  i0
-  beq .Lsvf_restore
-  ldl w1
-  stl w7
-  i kw_step_local
-  stl w0
-  u 4
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_step_keyword
   ldl w0
   i1
   beq .Lsvf_step_kw

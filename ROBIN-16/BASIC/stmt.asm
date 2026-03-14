@@ -109,12 +109,16 @@ stmt_parse_line_target:
 
 ; ------------------------------------------------------------
 ; stmt_parse_then_keyword()
-; parses THEN as an exact identifier
+; parses THEN as either a tokenized keyword byte or exact identifier
 ; out: w0=1 iff THEN consumed, else 0
 ; ------------------------------------------------------------
 stmt_parse_then_keyword:
   stl w14
   CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u TOKB_THEN
+  beq .Lspth_tok
   CALL tok_read_ident
   ldl w1
   i4
@@ -123,10 +127,96 @@ stmt_parse_then_keyword:
   stl w0
   ldl w14
   jr
+.Lspth_tok:
+  ldl w10
+  inc
+  stl w10
+  u 1
+  stl w0
+  ldl w14
+  jr
 .Lspth_len_ok:
   ldl w1
   stl w7
   i kw_then
+  stl w0
+  u 4
+  stl w1
+  CALL stmt_ident_eq
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; stmt_parse_to_keyword()
+; parses TO as either a tokenized keyword byte or exact identifier
+; out: w0=1 iff TO consumed, else 0
+; ------------------------------------------------------------
+stmt_parse_to_keyword:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u TOKB_TO
+  beq .Lspto_tok
+  CALL tok_read_ident
+  ldl w1
+  i2
+  beq .Lspto_len_ok
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lspto_tok:
+  ldl w10
+  inc
+  stl w10
+  u 1
+  stl w0
+  ldl w14
+  jr
+.Lspto_len_ok:
+  ldl w1
+  stl w7
+  i kw_to_local
+  stl w0
+  u 2
+  stl w1
+  CALL stmt_ident_eq
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; stmt_parse_step_keyword()
+; parses STEP as either a tokenized keyword byte or exact identifier
+; out: w0=1 iff STEP consumed, else 0
+; ------------------------------------------------------------
+stmt_parse_step_keyword:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u TOKB_STEP
+  beq .Lspsk_tok
+  CALL tok_read_ident
+  ldl w1
+  i4
+  beq .Lspsk_len_ok
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lspsk_tok:
+  ldl w10
+  inc
+  stl w10
+  u 1
+  stl w0
+  ldl w14
+  jr
+.Lspsk_len_ok:
+  ldl w1
+  stl w7
+  i kw_step_local
   stl w0
   u 4
   stl w1
@@ -289,6 +379,234 @@ kw_then:   .ascii "THEN"
 stmt_parse_kind:
   stl w14
   CALL tok_skip_spaces
+
+  ; tokenized stored-line fast path
+  CALL tok_peek
+  stl w3
+  ldl w3
+  i 0x80
+  and
+  i0
+  beq .Lspk_text
+
+  ldl w3
+  u TOKB_END
+  beq .Lspk_tok_end
+  ldl w3
+  u TOKB_GOTO
+  beq .Lspk_tok_goto
+  ldl w3
+  u TOKB_GOSUB
+  beq .Lspk_tok_gosub
+  ldl w3
+  u TOKB_RETURN
+  beq .Lspk_tok_return
+  ldl w3
+  u TOKB_NEW
+  beq .Lspk_tok_new
+  ldl w3
+  u TOKB_LIST
+  beq .Lspk_tok_list
+  ldl w3
+  u TOKB_RUN
+  beq .Lspk_tok_run
+  ldl w3
+  u TOKB_CLS
+  beq .Lspk_tok_cls
+  ldl w3
+  u TOKB_HELP
+  beq .Lspk_tok_help
+  ldl w3
+  u TOKB_IF
+  beq .Lspk_tok_if
+  ldl w3
+  u TOKB_FOR
+  beq .Lspk_tok_for
+  ldl w3
+  u TOKB_NEXT
+  beq .Lspk_tok_next
+  ldl w3
+  u TOKB_INPUT
+  beq .Lspk_tok_input
+  ldl w3
+  u TOKB_LET
+  beq .Lspk_tok_let
+  ldl w3
+  u TOKB_PRINT
+  beq .Lspk_tok_print
+  ldl w3
+  u TOKB_REM
+  beq .Lspk_tok_rem
+  ; non-statement token at line start
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+
+.Lspk_tok_end:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_END
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_goto:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_GOTO
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_gosub:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_GOSUB
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_return:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_RETURN
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_new:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_NEW
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_list:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_LIST
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_run:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_RUN
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_cls:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_CLS
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_help:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_HELP
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_if:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_IF
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_for:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_FOR
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_next:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_NEXT
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_input:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_INPUT
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_let:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_LET
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_print:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_PRINT
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Lspk_tok_rem:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_REM
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+
+.Lspk_text:
   CALL tok_read_ident
   ldl w1
   i0
