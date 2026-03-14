@@ -1,18 +1,24 @@
 ; BIOS/R816/BASIC/expr.asm
-; Integer expression evaluator (v0.4.1)
+; Integer expression evaluator (hardened / streamlined pass)
 ; - signed 16-bit integers
-; - grammar: expr := term (('+'|'-') term)*
-;           term := factor (('*'|'/') factor)*
-;         factor := number | ident | '(' expr ')' | '-' factor
+; - grammar: expr   := term (('+'|'-') term)*
+;            term   := factor (('*'|'/') factor)*
+;            factor := number | ident | '(' expr ')' | '-' factor
 ;
-; Conventions:
+; Register contract:
+;   w0  = return value
+;   w1  = success flag (1=success, 0=failure)
+;   w2  = running left accumulator at current precedence level
+;   w3  = operator / current char scratch
+;   w4  = non-recursive temp (e.g. saved paren value)
 ;   w10 = parse pointer (updated)
-;   expr_eval() -> w0=value, w1=1 if consumed tokens else 0
 ;
-; IMPORTANT:
-;   expr_parse_expr and expr_parse_term keep their running left operand in w2.
-;   Because recursive sub-parsers also use w2/w3, left must be preserved across CALLs.
-
+; R8 style used here:
+; - workspace registers hold live parser state
+; - operand stack is used for ALU flow
+; - PUSH/POP is used only at true recursive boundaries to preserve the
+;   current left accumulator across a deeper parse call
+;
 ; ------------------------------------------------------------
 ; expr_eval()
 ; out: w0=value, w1=success(1/0)
@@ -20,35 +26,24 @@
 expr_eval:
   stl w14
 
-  ldl w10
-  stl w9          ; start
-
   CALL expr_parse_expr
 
-  ldl w10
-  ldl w9
-  beq .Lex_fail
-
-  u 1
-  stl w1
-  ldl w14
-  jr
-
-.Lex_fail:
-  i0
-  stl w1
   ldl w14
   jr
 
 ; ------------------------------------------------------------
-; expr_parse_expr() -> w0
+; expr_parse_expr() -> w0, w1=success
 ; ------------------------------------------------------------
 expr_parse_expr:
   stl w14
 
   CALL expr_parse_term
+  ldl w1
+  i0
+  beq .Lex_expr_fail
+
   ldl w0
-  stl w2          ; left
+  stl w2          ; left accumulator
 
 .Lex_e_loop:
   CALL tok_skip_spaces
@@ -69,6 +64,8 @@ expr_parse_expr:
   ; done
   ldl w2
   stl w0
+  u 1
+  stl w1
   ldl w14
   jr
 
@@ -78,22 +75,18 @@ expr_parse_expr:
   inc
   stl w10
 
-  ; preserve left across recursive call
+  ; preserve current left across recursive call
   ldl w2
   push
 
   CALL expr_parse_term
+  ldl w1
+  i0
+  beq .Lex_e_rhs_fail
 
-  ; rhs -> w4
-  ldl w0
-  stl w4
-
-  ; restore left
+  ; left = POP, rhs = w0
   pop
-  stl w2
-
-  ldl w2
-  ldl w4
+  ldl w0
   add
   stl w2
   bra .Lex_e_loop
@@ -104,35 +97,47 @@ expr_parse_expr:
   inc
   stl w10
 
-  ; preserve left across recursive call
+  ; preserve current left across recursive call
   ldl w2
   push
 
   CALL expr_parse_term
+  ldl w1
+  i0
+  beq .Lex_e_rhs_fail
 
-  ; rhs -> w4
-  ldl w0
-  stl w4
-
-  ; restore left
+  ; left = POP, rhs = w0
   pop
-  stl w2
-
-  ldl w2
-  ldl w4
+  ldl w0
   sub
   stl w2
   bra .Lex_e_loop
 
+.Lex_e_rhs_fail:
+  ; discard preserved left and fail hard
+  pop
+  stl w4
+.Lex_expr_fail:
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+
 ; ------------------------------------------------------------
-; expr_parse_term() -> w0
+; expr_parse_term() -> w0, w1=success
 ; ------------------------------------------------------------
 expr_parse_term:
   stl w14
 
   CALL expr_parse_factor
+  ldl w1
+  i0
+  beq .Lex_term_fail
+
   ldl w0
-  stl w2          ; left
+  stl w2          ; left accumulator
 
 .Lex_t_loop:
   CALL tok_skip_spaces
@@ -152,6 +157,8 @@ expr_parse_term:
 
   ldl w2
   stl w0
+  u 1
+  stl w1
   ldl w14
   jr
 
@@ -161,22 +168,18 @@ expr_parse_term:
   inc
   stl w10
 
-  ; preserve left across recursive call
+  ; preserve current left across recursive call
   ldl w2
   push
 
   CALL expr_parse_factor
+  ldl w1
+  i0
+  beq .Lex_t_rhs_fail
 
-  ; rhs -> w4
-  ldl w0
-  stl w4
-
-  ; restore left
+  ; left = POP, rhs = w0
   pop
-  stl w2
-
-  ldl w2
-  ldl w4
+  ldl w0
   mul
   stl w2
   bra .Lex_t_loop
@@ -187,28 +190,36 @@ expr_parse_term:
   inc
   stl w10
 
-  ; preserve left across recursive call
+  ; preserve current left across recursive call
   ldl w2
   push
 
   CALL expr_parse_factor
+  ldl w1
+  i0
+  beq .Lex_t_rhs_fail
 
-  ; rhs -> w4
-  ldl w0
-  stl w4
-
-  ; restore left
+  ; left = POP, rhs = w0
   pop
-  stl w2
-
-  ldl w2
-  ldl w4
+  ldl w0
   div
   stl w2
   bra .Lex_t_loop
 
+.Lex_t_rhs_fail:
+  ; discard preserved left and fail hard
+  pop
+  stl w4
+.Lex_term_fail:
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+
 ; ------------------------------------------------------------
-; expr_parse_factor() -> w0
+; expr_parse_factor() -> w0, w1=success
 ; ------------------------------------------------------------
 expr_parse_factor:
   stl w14
@@ -216,7 +227,7 @@ expr_parse_factor:
   CALL tok_skip_spaces
   CALL tok_peek
   ldl w0
-  stl w3          ; ch
+  stl w3          ; current char / token
 
   ; '(' ?
   ldl w3
@@ -243,7 +254,7 @@ expr_parse_factor:
 
 .Lfac_number:
   CALL tok_read_u16
-  ; tok_read_u16 sets w0=value, w1=consumed
+  ; tok_read_u16 returns w0=value, w1=consumed(1/0)
   ldl w14
   jr
 
@@ -253,8 +264,10 @@ expr_parse_factor:
   i0
   beq .Lfac_fail
 
-  ; vars_get(namePtr=w0, len=w1)
+  ; vars_get(namePtr=w0, len=w1) -> w0=value
   CALL vars_get
+  u 1
+  stl w1
   ldl w14
   jr
 
@@ -265,31 +278,28 @@ expr_parse_factor:
   stl w10
 
   CALL expr_parse_expr
+  ldl w1
+  i0
+  beq .Lfac_fail
 
-  ; preserve inner value across tok helpers
   ldl w0
-  push
+  stl w4          ; preserve inner value across tok helpers
 
   CALL tok_skip_spaces
   CALL tok_peek
   ldl w0
   u 41
-  beq .Lfac_cons_rparen
+  bne .Lfac_fail  ; require ')'
 
-  ; missing ')': still return saved value
-  pop
-  stl w0
-  ldl w14
-  jr
-
-.Lfac_cons_rparen:
+  ; consume ')'
   ldl w10
   inc
   stl w10
 
-  pop
+  ldl w4
   stl w0
-
+  u 1
+  stl w1
   ldl w14
   jr
 
@@ -298,17 +308,24 @@ expr_parse_factor:
   ldl w10
   inc
   stl w10
+
   CALL expr_parse_factor
+  ldl w1
+  i0
+  beq .Lfac_fail
 
   ldl w0
   neg
   stl w0
-
+  u 1
+  stl w1
   ldl w14
   jr
 
 .Lfac_fail:
   i0
   stl w0
+  i0
+  stl w1
   ldl w14
   jr
