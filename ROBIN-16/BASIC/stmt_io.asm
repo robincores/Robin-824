@@ -19,16 +19,17 @@ stmt_exec_print:
   i0
   beq .Lsep_syntax
   ldl w0
-  stl w2
+  push
   CALL stmt_require_eol
   ldl w0
   i1
   beq .Lsep_num_ok
+  pop
   CALL stmt_fail_syntax
   ldl w14
   jr
 .Lsep_num_ok:
-  ldl w2
+  pop
   stl w0
   CALL stmt_print_i16
   BIOS_CRLF

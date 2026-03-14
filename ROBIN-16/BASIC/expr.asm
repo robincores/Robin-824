@@ -9,12 +9,9 @@
 ;   w10 = parse pointer (updated)
 ;   expr_eval() -> w0=value, w1=1 if consumed tokens else 0
 ;
-; R8 performance / style notes:
-;   - keep short arithmetic flow on the operand stack
-;   - keep live parser state in workspace
-;   - use PUSH/POP only at recursive boundaries where the same workspace locals
-;     are reused by deeper parser calls
-;   - avoid stack<->workspace ping-pong after POP; combine directly on-stack
+; IMPORTANT:
+;   expr_parse_expr and expr_parse_term keep their running left operand in w2.
+;   Because recursive sub-parsers also use w2/w3, left must be preserved across CALLs.
 
 ; ------------------------------------------------------------
 ; expr_eval()
@@ -91,8 +88,11 @@ expr_parse_expr:
   ldl w0
   stl w4
 
-  ; restore left to A, then combine directly on-stack
+  ; restore left
   pop
+  stl w2
+
+  ldl w2
   ldl w4
   add
   stl w2
@@ -114,8 +114,11 @@ expr_parse_expr:
   ldl w0
   stl w4
 
-  ; restore left to A, then combine directly on-stack
+  ; restore left
   pop
+  stl w2
+
+  ldl w2
   ldl w4
   sub
   stl w2
@@ -168,8 +171,11 @@ expr_parse_term:
   ldl w0
   stl w4
 
-  ; restore left to A, then combine directly on-stack
+  ; restore left
   pop
+  stl w2
+
+  ldl w2
   ldl w4
   mul
   stl w2
@@ -191,8 +197,11 @@ expr_parse_term:
   ldl w0
   stl w4
 
-  ; restore left to A, then combine directly on-stack
+  ; restore left
   pop
+  stl w2
+
+  ldl w2
   ldl w4
   div
   stl w2
@@ -250,8 +259,10 @@ expr_parse_factor:
   stl w10
 
   CALL expr_parse_expr
+
+  ; preserve inner value across tok helpers
   ldl w0
-  stl w4              ; preserve inner value in workspace, not memory stack
+  push
 
   CALL tok_skip_spaces
   CALL tok_peek
@@ -260,7 +271,7 @@ expr_parse_factor:
   beq .Lfac_cons_rparen
 
   ; missing ')': still return saved value
-  ldl w4
+  pop
   stl w0
   ldl w14
   jr
@@ -270,7 +281,7 @@ expr_parse_factor:
   inc
   stl w10
 
-  ldl w4
+  pop
   stl w0
 
   ldl w14

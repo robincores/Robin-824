@@ -3,9 +3,11 @@
 ; Record format:
 ;   [0] lineLo
 ;   [1] lineHi (bit7 = deleted flag)
-;   [2] textLenIncludingNul
-;   [3..] text bytes including trailing NUL
+;   [2] payloadLenIncludingNul
+;   [3..] tokenized text bytes including trailing NUL
 ;
+; Stored program lines are tokenized to reduce RAM usage; LIST/RUN detokenize
+; back to plain text when presenting or executing a line.
 ; The live program is kept in ascending line-number order.
 
 ; ------------------------------------------------------------
@@ -566,26 +568,16 @@ prog_store_line:
   bra .Lps_done
 
 .Lps_line_ok:
-  ; text length including trailing NUL
+  ; tokenize text into TOK_LINE_BUF (keyword compression)
   ldl w8
-  stl w10
-  i0
-  stl w12
-.Lps_len_loop:
-  ldl w10
-  lu
+  stl w0
+  i TOK_LINE_BUF
   stl w1
-  ldl w12
-  inc
-  stl w12
-  ldl w1
-  i0
-  beq .Lps_len_done
-  ldl w10
-  inc
-  stl w10
-  bra .Lps_len_loop
-.Lps_len_done:
+  CALL tok_tokenize_line
+  ldl w0
+  stl w12              ; tokenized length including trailing NUL
+  i TOK_LINE_BUF
+  stl w8               ; tokenized payload ptr
 
   ; tombstone previous live line if present
   ldl w7
@@ -864,29 +856,30 @@ prog_list:
   BIOS_CALL0 SYS_PRINT_U16
   BIOS_PUTC 32
 
+  ; detokenize payload into LINE_BUF for human-readable LIST
   ldl w10
   u 3
   add
+  stl w0
+  i LINE_BUF
+  stl w1
+  CALL tok_detokenize_line
+
+  i LINE_BUF
   stl w13
-  ldl w12
-  dec
-  stl w6               ; printable chars = len - 1
 .Lpl_txt:
-  ldl w6
-  i0
-  beq .Lpl_eol
   ldl w13
   lu
   stl w0
+  ldl w0
+  i0
+  beq .Lpl_eol
   ldl w0
   stl w1
   BIOS_CALL0 SYS_PUTC
   ldl w13
   inc
   stl w13
-  ldl w6
-  dec
-  stl w6
   bra .Lpl_txt
 .Lpl_eol:
   BIOS_CRLF
@@ -1005,15 +998,22 @@ prog_run_loop:
   i0
   bne .Lprl_after_exec
 
-  ; preserve top and nextPtr across basic_exec_line
+  ; preserve top and nextPtr across detokenize + execution
   ldl w11
   push
   ldl w9
   push
 
+  ; detokenize stored payload into LINE_BUF, then execute that plain-text line
   ldl w10
   u 3
   add
+  stl w0
+  i LINE_BUF
+  stl w1
+  CALL tok_detokenize_line
+
+  i LINE_BUF
   stl w0
   CALL basic_exec_line
 

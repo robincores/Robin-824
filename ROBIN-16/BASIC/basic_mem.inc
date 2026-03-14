@@ -47,5 +47,9 @@
 .equ FOR_STACK_BYTES  (FOR_STACK_MAX * FOR_FRAME_BYTES)
 .equ FOR_STACK_BASE   0x9A80
 
+; Tokenized-line work buffer (enough for a full input tail + NUL)
+.equ TOK_LINE_BUF    0x9B00
+.equ TOK_LINE_MAX    LINE_MAX
+
 .equ PROG_BASE       0xA000
 .equ PROG_LIMIT      0xBE00
