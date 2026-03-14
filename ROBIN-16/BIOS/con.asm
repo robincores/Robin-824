@@ -3,8 +3,7 @@
 ; BIOS/R816/con.asm
 ; Console routines
 
-.include "ROBIN-16/BIOS/ports.inc"
-.include "ROBIN-16/BIOS/macros.inc"
+; Included by the master translation unit after ports.inc/macros.inc.
 
 ; NOTE on VIDWIN safety:
 ;   Graphics code often uses VIDWIN bank mode (WIN_MMIO=0) to access VRAM.
@@ -143,12 +142,12 @@ bios_print_u16:
 .Lcon_pu_push:
   ldl w2
   u 10
-  mod
+  remu
   stl w1
 
   ldl w2
   u 10
-  div
+  divu
   stl w2
 
   ldl w1

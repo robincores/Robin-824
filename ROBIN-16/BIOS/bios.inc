@@ -188,3 +188,39 @@
 .macro BIOS_PRINT_U16 v
   BIOS_CALL1 SYS_PRINT_U16, \v
 .endm
+
+; ----------------------------------------------------------------------------
+; Compatibility wrappers for code that already places args in workspace regs
+;
+; Contract:
+;   BIOS_PUTS_Z_W0    : w0 = addr
+;   BIOS_PUTC_W0      : w0 = ch
+;   BIOS_PRINT_U16_W0 : w0 = value
+;   BIOS_READLINE_W0W1: w0 = buf, w1 = maxlen
+; ----------------------------------------------------------------------------
+
+.macro BIOS_PUTS_Z_W0
+  ldl w0
+  stl w1
+  BIOS_CALL0 SYS_PUTS_Z
+.endm
+
+.macro BIOS_PUTC_W0
+  ldl w0
+  stl w1
+  BIOS_CALL0 SYS_PUTC
+.endm
+
+.macro BIOS_PRINT_U16_W0
+  ldl w0
+  stl w1
+  BIOS_CALL0 SYS_PRINT_U16
+.endm
+
+.macro BIOS_READLINE_W0W1
+  ldl w1
+  stl w2
+  ldl w0
+  stl w1
+  BIOS_CALL0 SYS_READLINE
+.endm

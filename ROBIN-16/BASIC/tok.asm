@@ -69,10 +69,41 @@ tok_to_upper:
   ldl w14
   jr
 
+
+; ------------------------------------------------------------
+; tok_is_kw_delim()
+; returns w0=1 iff current *w10 is a keyword delimiter:
+;   NUL, space, tab, ':'
+; ------------------------------------------------------------
+tok_is_kw_delim:
+  stl w14
+  CALL tok_peek
+  ldl w0
+  i0
+  beq .Ltok_kd_yes
+  u 32
+  beq .Ltok_kd_yes
+  ldl w0
+  u 9
+  beq .Ltok_kd_yes
+  ldl w0
+  u 58
+  beq .Ltok_kd_yes
+  i0
+  stl w0
+  ldl w14
+  jr
+.Ltok_kd_yes:
+  i1
+  stl w0
+  ldl w14
+  jr
+
 ; ------------------------------------------------------------
 ; tok_read_u16()
-; Parses decimal digits at w10.
-; out: w0=value, w1=1 if at least one digit consumed else 0
+; Parses decimal digits at w10 with overflow checking.
+; out: w0=value, w1=1 if at least one digit consumed and <=65535 else 0
+; note: on overflow, w10 is advanced past the full digit run and w1=0
 ; ------------------------------------------------------------
 tok_read_u16:
   stl w14
@@ -101,7 +132,24 @@ tok_read_u16:
   sub
   stl w3
 
-  ; value = value*10 + digit
+  ; overflow check for max 65535:
+  ; if value > 6553 => overflow
+  ; if value == 6553 and digit > 5 => overflow
+  ldl w2
+  i 6553
+  blt .Lnum_mul_add
+  ldl w2
+  i 6553
+  beq .Lnum_eq_thresh
+  bra .Lnum_overflow
+
+.Lnum_eq_thresh:
+  ldl w3
+  u 6
+  blt .Lnum_mul_add
+  bra .Lnum_overflow
+
+.Lnum_mul_add:
   ldl w2
   u 10
   mul
@@ -113,6 +161,31 @@ tok_read_u16:
   inc
   stl w10
   bra .Lnum_loop
+
+.Lnum_overflow:
+  ; consume remaining digits so callers do not see a partial token
+.Lnum_ovf_consume:
+  ldl w10
+  lu
+  stl w1
+  ldl w1
+  u 48
+  blt .Lnum_fail
+  ldl w1
+  u 58
+  bge .Lnum_fail
+  ldl w10
+  inc
+  stl w10
+  bra .Lnum_ovf_consume
+
+.Lnum_fail:
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
 
 .Lnum_done:
   ldl w2
@@ -131,6 +204,36 @@ tok_read_u16:
 .Lnum_no:
   i0
   stl w1
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; tok_read_lineno()
+; Parses a BASIC line number at w10.
+; out: w0=value, w1=1 if at least one digit consumed and <=32767 else 0
+; note: on failure, w10 is advanced past the full digit run
+; ------------------------------------------------------------
+tok_read_lineno:
+  stl w14
+  CALL tok_read_u16
+  ldl w1
+  i0
+  bne .Ltln_have_num
+  ldl w14
+  jr
+.Ltln_have_num:
+  ldl w0
+  i 0x8000
+  and
+  i0
+  beq .Ltln_ok
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Ltln_ok:
   ldl w14
   jr
 
@@ -274,6 +377,33 @@ tok_read_ident:
   stl w10
   j .Lid_loop
 .Lid_done:
+  ; optional trailing '$' for string variables
+  ldl w10
+  lu
+  stl w0
+  ldl w0
+  u 36
+  bne .Lid_finish
+
+  ; store '$' if len < max
+  ldl w11
+  i VAR_NAME_MAX
+  bge .Lid_consume_dollar
+  ldl w12
+  ldl w0
+  sb
+  ldl w12
+  inc
+  stl w12
+  ldl w11
+  inc
+  stl w11
+.Lid_consume_dollar:
+  ldl w10
+  inc
+  stl w10
+
+.Lid_finish:
   ; NUL terminate
   ldl w12
   u 0

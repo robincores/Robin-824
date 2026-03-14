@@ -1,5 +1,6 @@
 ; BIOS/R816/kbd.asm
-; Keyboard routines (expects ports.inc + macros.inc + con.asm already included)
+; Keyboard routines. Project rule: implementation .asm files are included by the
+; master translation unit, which owns shared dependency includes and ordering.
 
 bios_kbd_getc_block:
   stl w14

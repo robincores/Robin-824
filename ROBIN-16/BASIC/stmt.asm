@@ -1,14 +1,14 @@
 ; BIOS/R816/BASIC/stmt.asm
-; Statements. Uses w10=parse ptr. Returns w0=1 handled else 0.
-;
-; v0.4 adds:
-; - LET / assignment (INT16)
-; - PRINT <expr>
-; - IF <expr> <op> <expr> THEN <action>
+; Statement classification + shared statement helpers.
+; The dispatcher classifies the first identifier once and then jumps to a
+; statement executor that parses only the statement tail.
 ;
 ; Conventions:
-; - No numeric local labels (1f/1b). Use .Lxxx only.
-; - Avoid u 0 / u 1 (use i0 / i1).
+; - w10 is the parse pointer
+; - stmt_dispatch() returns w0=1 handled, else 0
+; - stmt_parse_kind() advances w10 past the first identifier and returns:
+;     w0 = STMTK_*
+;     w1 = identifier length (useful for shorthand assignment)
 
 ; ------------------------------------------------------------
 ; helper: stmt_print_i16(w0=value)
@@ -27,7 +27,7 @@ stmt_print_i16:
   beq .Lpi_pos
 
   ; print '-'
-  LIB_PUTC_IMM 45
+  BIOS_PUTC 45
 
   ; value = -value
   ldl w2
@@ -37,2245 +37,527 @@ stmt_print_i16:
 .Lpi_pos:
   ldl w2
   stl w0
-  LIB_PRINT_U16_W0
-
-  ldl w14
-  jr
-
-; ---------- IF ----------
-; IF <expr> <op> <expr> THEN <action>
-; <op> supports: =  <>  <  <=  >  >=   (signed 16-bit)
-; <action> supports:
-;   - <lineno>          (implied GOTO)
-;   - GOTO <lineno>
-;   - END
-;   - PRINT <expr|string>
-;   - LET / assignment
-stmt_try_if:
-  stl w14
-  CALL tok_skip_spaces
-
-  ldl w10
-  stl w9                ; start ptr (for restore)
-
-  ; --- match "IF" keyword (case-insensitive) ---
-  CALL tok_peek
-  CALL tok_to_upper
   ldl w0
-  u 73                  ; 'I'
-  beq .Lif_got_I
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lif_got_I:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 70                  ; 'F'
-  beq .Lif_got_F
-
-  ; not IF -> restore and return 0
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lif_got_F:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  ; left expr
-  CALL expr_eval
-  ldl w1
-  i0
-  bne .Lif_left_ok
-  j .Lif_syntax
-.Lif_left_ok:
-  ldl w0
-  stl w2                ; left
-
-  CALL tok_skip_spaces
-
-  ; parse operator into w5:
-  ; 0 EQ, 1 NE, 2 LT, 3 LE, 4 GT, 5 GE
-  CALL tok_peek
-  stl w3                ; ch
-
-  ; '='
-  ldl w3
-  u 61
-  beq .Lif_op_eq
-
-  ; '<'
-  ldl w3
-  u 60
-  beq .Lif_op_lt
-
-  ; '>'
-  ldl w3
-  u 62
-  beq .Lif_op_gt
-
-  j .Lif_syntax
-
-.Lif_op_eq:
-  i0
-  stl w5
-  ldl w10
-  inc
-  stl w10
-  bra .Lif_rhs
-
-.Lif_op_lt:
-  ; consume '<'
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  stl w3
-
-  ; '<=' ?
-  ldl w3
-  u 61
-  beq .Lif_op_le
-
-  ; '<>' ?
-  ldl w3
-  u 62
-  beq .Lif_op_ne
-
-  ; plain '<'
-  u 2
-  stl w5
-  bra .Lif_rhs
-
-.Lif_op_le:
-  u 3
-  stl w5
-  ldl w10
-  inc
-  stl w10
-  bra .Lif_rhs
-
-.Lif_op_ne:
-  i1
-  stl w5
-  ldl w10
-  inc
-  stl w10
-  bra .Lif_rhs
-
-.Lif_op_gt:
-  ; consume '>'
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  stl w3
-
-  ; '>=' ?
-  ldl w3
-  u 61
-  beq .Lif_op_ge
-
-  ; plain '>'
-  u 4
-  stl w5
-  bra .Lif_rhs
-
-.Lif_op_ge:
-  u 5
-  stl w5
-  ldl w10
-  inc
-  stl w10
-  bra .Lif_rhs
-
-.Lif_rhs:
-  CALL tok_skip_spaces
-
-  ; right expr
-  CALL expr_eval
-  ldl w1
-  i0
-  bne .Lif_right_ok
-  j .Lif_syntax
-.Lif_right_ok:
-  ldl w0
-  stl w4                ; right
-
-  ; THEN keyword
-  CALL tok_skip_spaces
-
-  ; 'T'
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  beq .Lif_then_h
-  j .Lif_syntax
-.Lif_then_h:
-  ldl w10
-  inc
-  stl w10
-
-  ; 'H'
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 72
-  beq .Lif_then_e
-  j .Lif_syntax
-.Lif_then_e:
-  ldl w10
-  inc
-  stl w10
-
-  ; 'E'
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  beq .Lif_then_n
-  j .Lif_syntax
-.Lif_then_n:
-  ldl w10
-  inc
-  stl w10
-
-  ; 'N'
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  beq .Lif_then_ok
-  j .Lif_syntax
-.Lif_then_ok:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  ; Evaluate condition -> branch to action or skip
-  ; Compare uses B=left, A=right
-  ldl w5
-  i0
-  beq .Lif_cond_eq
-  ldl w5
-  i1
-  beq .Lif_cond_ne
-  ldl w5
-  u 2
-  beq .Lif_cond_lt
-  ldl w5
-  u 3
-  beq .Lif_cond_le
-  ldl w5
-  u 4
-  beq .Lif_cond_gt
-  bra .Lif_cond_ge
-
-.Lif_cond_eq:
-  ldl w2
-  ldl w4
-  beq .Lif_do_action
-  bra .Lif_skip
-
-.Lif_cond_ne:
-  ldl w2
-  ldl w4
-  bne .Lif_do_action
-  bra .Lif_skip
-
-.Lif_cond_lt:
-  ldl w2
-  ldl w4
-  blt .Lif_do_action
-  bra .Lif_skip
-
-.Lif_cond_le:
-  ldl w2
-  ldl w4
-  blt .Lif_do_action
-  ldl w2
-  ldl w4
-  beq .Lif_do_action
-  bra .Lif_skip
-
-.Lif_cond_gt:
-  ldl w2
-  ldl w4
-  blt .Lif_skip
-  ldl w2
-  ldl w4
-  beq .Lif_skip
-  bra .Lif_do_action
-
-.Lif_cond_ge:
-  ldl w2
-  ldl w4
-  bge .Lif_do_action
-  bra .Lif_skip
-
-.Lif_skip:
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Lif_do_action:
-  ; action starts at w10
-  ldl w10
-  stl w8
-
-  ; digit? => implied GOTO <lineno>
-  CALL tok_peek
-  stl w6                ; ch
-  ldl w6
-  u 48
-  blt .Lif_try_kw
-  ldl w6
-  u 58
-  bge .Lif_try_kw
-
-  CALL tok_read_u16
-  ldl w1
-  i0
-  bne .Lif_have_lineno
-
-  ; fallthrough to keyword tries
-  ldl w8
-  stl w10
-  bra .Lif_try_kw
-
-.Lif_have_lineno:
-  ldl w0
-  stl w7                ; line
-
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lif_direct_goto
-
-  ; running -> pending goto
-  ldl w7
-  u 0xFF
-  and
   stl w1
-  ldl w7
-  srl 4
-  srl 4
-  stl w2
+  BIOS_CALL0 SYS_PRINT_U16
 
-  i SYS_GOTO_LO
-  ldl w1
-  sb
-  i SYS_GOTO_HI
-  ldl w2
-  sb
-  i SYS_GOTO_PEND
-  i1
-  sb
+  ldl w14
+  jr
 
-  bra .Lif_done
-
-.Lif_direct_goto:
-  CALL vars_init
-  ldl w7
-  stl w0
-  CALL prog_run_from_line
-  bra .Lif_done
-
-.Lif_try_kw:
-  ; Try GOTO / END / PRINT / LET (in that order)
-  ldl w8
-  stl w10
-  CALL stmt_try_goto
-  ldl w0
-  i1
-  beq .Lif_done
-
-  ldl w8
-  stl w10
-  CALL stmt_try_end
-  ldl w0
-  i1
-  beq .Lif_done
-
-  ldl w8
-  stl w10
-  CALL stmt_try_print
-  ldl w0
-  i1
-  beq .Lif_done
-
-  ldl w8
-  stl w10
-  CALL stmt_try_let
-  ldl w0
-  i1
-  beq .Lif_done
-
-  j .Lif_syntax
-
-.Lif_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-
-  ; If we are RUNning, abort RUN on syntax error
+; ------------------------------------------------------------
+; stmt_abort_if_running()
+; ------------------------------------------------------------
+stmt_abort_if_running:
+  stl w14
   i SYS_RUNNING
   lu
   i0
-  beq .Lif_no_abort
+  beq .Lsair_done
   i SYS_END_PEND
-  i1
+  u 1
   sb
-.Lif_no_abort:
-  bra .Lif_done
+.Lsair_done:
+  ldl w14
+  jr
 
-.Lif_done:
-  i1
+; ------------------------------------------------------------
+; stmt_fail_syntax()
+; prints ?SYNTAX ERROR, aborts RUN if active, returns handled=1
+; ------------------------------------------------------------
+stmt_fail_syntax:
+  stl w14
+  BIOS_PUTS_Z err_syntax
+  BIOS_CRLF
+  CALL stmt_abort_if_running
+  u 1
   stl w0
   ldl w14
   jr
 
-; ---------- END ----------
-stmt_try_end:
+; ------------------------------------------------------------
+; stmt_require_eol()
+; skips trailing spaces; returns w0=1 iff at end of line
+; ------------------------------------------------------------
+stmt_require_eol:
   stl w14
   CALL tok_skip_spaces
-
   CALL tok_peek
-  CALL tok_to_upper
   ldl w0
-  u 69                  ; E
-  beq .Lend_e
+  i0
+  beq .Lsre_yes
   i0
   stl w0
   ldl w14
   jr
-
-.Lend_e:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78                  ; N
-  beq .Lend_n
-  i0
+.Lsre_yes:
+  u 1
   stl w0
   ldl w14
   jr
 
-.Lend_n:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 68                  ; D
-  beq .Lend_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lend_ok:
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lend_done
-
-  i SYS_END_PEND
-  i1
-  sb
-
-.Lend_done:
-  i1
-  stl w0
-  ldl w14
-  jr
-
-; ---------- GOTO ----------
-stmt_try_goto:
+; ------------------------------------------------------------
+; stmt_parse_line_target()
+; parses a BASIC line target (<32768)
+; out: w0=lineNo, w1=1 iff valid line target consumed
+; ------------------------------------------------------------
+stmt_parse_line_target:
   stl w14
   CALL tok_skip_spaces
-
-  ; G
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 71
-  beq .Lgto_g
-  i0
-  stl w0
+  CALL tok_read_lineno
   ldl w14
   jr
 
-.Lgto_g:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 79
-  beq .Lgto_o1
-  i0
-  stl w0
-  ldl w14
-  jr
+; Statement kind enums
+.equ STMTK_NONE   0
+.equ STMTK_END    1
+.equ STMTK_GOTO   2
+.equ STMTK_GOSUB  3
+.equ STMTK_RETURN 4
+.equ STMTK_NEW    5
+.equ STMTK_LIST   6
+.equ STMTK_RUN    7
+.equ STMTK_CLS    8
+.equ STMTK_HELP   9
+.equ STMTK_IF     10
+.equ STMTK_FOR    11
+.equ STMTK_NEXT   12
+.equ STMTK_INPUT  13
+.equ STMTK_LET    14
+.equ STMTK_PRINT  15
+.equ STMTK_REM    16
+.equ STMTK_ASSIGN 17
 
-.Lgto_o1:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  beq .Lgto_t
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lgto_t:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 79
-  beq .Lgto_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lgto_ok:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  ; parse line number using tok_read_u16
-  CALL tok_read_u16
-  ldl w1
-  i0
-  beq .Lgto_no
-
-  ldl w0
-  stl w7              ; line
-
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lgto_direct
-
-  ; running: set pending goto
+; ------------------------------------------------------------
+; stmt_ident_eq(w0=kwPtr, w1=kwLen, w7=currentLen) -> w0=1/0
+; compares against VAR_NAME_BUF (uppercased by tok_read_ident)
+; ------------------------------------------------------------
+stmt_ident_eq:
+  stl w14
   ldl w7
-  u 0xFF
-  and
-  stl w1
-
-  ldl w7
-  srl 4
-  srl 4
-  stl w2
-
-  i SYS_GOTO_LO
   ldl w1
-  sb
-  i SYS_GOTO_HI
-  ldl w2
-  sb
-
-  i SYS_GOTO_PEND
-  i1
-  sb
-
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Lgto_direct:
-  ; like RUN: reset vars
-  CALL vars_init
-
-  ldl w7
-  stl w0
-  CALL prog_run_from_line
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Lgto_no:
+  beq .Lsie_len_ok
   i0
   stl w0
   ldl w14
   jr
-
-; ---------- NEW ----------
-stmt_try_new:
-  stl w14
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  beq .Lnew_n
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lnew_n:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  beq .Lnew_e
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lnew_e:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 87
-  beq .Lnew_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lnew_ok:
-  CALL prog_new
-  CALL vars_init
-  i1
-  stl w0
-  ldl w14
-  jr
-
-; ---------- LIST ----------
-stmt_try_list:
-  stl w14
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 76
-  beq .Llist_l
-  i0
-  stl w0
-  ldl w14
-  jr
-.Llist_l:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 73
-  beq .Llist_i
-  i0
-  stl w0
-  ldl w14
-  jr
-.Llist_i:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 83
-  beq .Llist_s
-  i0
-  stl w0
-  ldl w14
-  jr
-.Llist_s:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  beq .Llist_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Llist_ok:
-  CALL prog_list
-  i1
-  stl w0
-  ldl w14
-  jr
-
-; ---------- RUN ----------
-stmt_try_run:
-  stl w14
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  beq .Lrun_r
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lrun_r:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 85
-  beq .Lrun_u
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lrun_u:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  beq .Lrun_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lrun_ok:
-  CALL vars_init
-  CALL prog_run
-  i1
-  stl w0
-  ldl w14
-  jr
-
-; ---------- CLS ----------
-stmt_try_cls:
-  stl w14
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 67
-  beq .Lcls_c
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lcls_c:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 76
-  beq .Lcls_l
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lcls_l:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 83
-  beq .Lcls_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lcls_ok:
-  LIB_CLS
-  i1
-  stl w0
-  ldl w14
-  jr
-
-; ---------- HELP ----------
-stmt_try_help:
-  stl w14
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 72
-  beq .Lhelp_h
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lhelp_h:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  beq .Lhelp_e
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lhelp_e:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 76
-  beq .Lhelp_l
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lhelp_l:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 80
-  beq .Lhelp_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lhelp_ok:
-  LIB_PUTS_Z_IMM help_text
-  LIB_CRLF
-  i1
-  stl w0
-  ldl w14
-  jr
-
-help_text:
-  .ascii "COMMANDS: NEW, LIST, RUN, GOTO, END, IF, LET, PRINT, CLS, HELP"
-  .byte 0
-
-; ---------- LET / assignment ----------
-; supports:
-;   LET X = <expr>
-;   X = <expr>
-stmt_try_let:
-  stl w14
-
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9                ; start
-
-  ; check keyword LET
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 76                  ; L
-  bne .Llet_try_assign
-
-  ; 'E'
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  bne .Llet_try_assign_restore
-
-  ; 'T'
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bne .Llet_try_assign_restore
-
-  ; consume 'T'
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-  bra .Llet_parse
-
-.Llet_try_assign_restore:
-  ldl w9
-  stl w10
-
-.Llet_try_assign:
-  ; shorthand assignment: fallthrough
-  ldl w9
-  stl w10
-  CALL tok_skip_spaces
-
-.Llet_parse:
-  ; ident -> (w0=buf, w1=len)
-  CALL tok_read_ident
-  ldl w1
-  i0
-  beq .Llet_no
-
-  ldl w0
-  stl w6                ; namePtr
-  ldl w1
-  stl w7                ; len
-
-  CALL tok_skip_spaces
-  CALL tok_peek
-  ldl w0
-  u 61                  ; '='
-  beq .Llet_have_eq
-
-  ; not assignment
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Llet_have_eq:
-  ; consume '='
-  ldl w10
-  inc
-  stl w10
-
-  CALL expr_eval         ; w0=value, w1=ok
-  ldl w1
-  i0
-  beq .Llet_syntax
-
-  ldl w0
-  stl w2                 ; value
-
-  ldl w6
-  stl w0
-  ldl w7
-  stl w1
-  ldl w2
-  stl w2
-  CALL vars_set
-
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Llet_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-
-  ; If we are RUNning, abort RUN on syntax error
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Llet_no_abort
-  i SYS_END_PEND
-  i1
-  sb
-.Llet_no_abort:
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Llet_no:
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-; ---------- PRINT ----------
-stmt_try_print:
-  stl w14
-  CALL tok_skip_spaces
-
-  ; match PRINT
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 80
-  beq .Lpr_p
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_p:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  beq .Lpr_r
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_r:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 73
-  beq .Lpr_i
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_i:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  beq .Lpr_n
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_n:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  beq .Lpr_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_ok:
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  CALL tok_peek
-  ldl w0
-  u 34
-  beq .Lpr_string
-
-  ; numeric expression
-  CALL expr_eval
-  ldl w1
-  i0
-  beq .Lpr_syntax
-
-  ; print signed
-  CALL stmt_print_i16
-  LIB_CRLF
-
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_string:
-  ; skip opening quote
-  ldl w10
-  inc
-  stl w10
-
-.Lpr_str_loop:
-  CALL tok_peek
-  ldl w0
-  i0
-  beq .Lpr_done
-
-  ldl w0
-  u 34
-  beq .Lpr_done
-
-  LIB_PUTC_W0
-
-  ldl w10
-  inc
-  stl w10
-  bra .Lpr_str_loop
-
-.Lpr_done:
-  LIB_CRLF
-  i1
-  stl w0
-  ldl w14
-  jr
-
-.Lpr_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-
-  ; If we are RUNning, abort RUN on syntax error
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lpr_no_abort
-  i SYS_END_PEND
-  i1
-  sb
-.Lpr_no_abort:
-  i1
-  stl w0
-  ldl w14
-  jr
-
-
-; ---------- REM ----------
-; REM <anything>
-stmt_try_rem:
-  stl w14
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; R
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  bne .Lrem_no
-  ldl w10
-  inc
-  stl w10
-  ; E
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  bne .Lrem_no
-  ldl w10
-  inc
-  stl w10
-  ; M
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 77
-  bne .Lrem_no
-
-  ; consume M
-  ldl w10
-  inc
-  stl w10
-
-  ; delimiter after REM
-  CALL tok_peek
-  ldl w0
-  u 32
-  beq .Lrem_ok
-  ldl w0
-  u 9
-  beq .Lrem_ok
-  ldl w0
-  i0
-  beq .Lrem_ok
-  bra .Lrem_no
-
-.Lrem_ok:
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lrem_no:
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-
-; ---------- INPUT ----------
-; INPUT <ident>
-stmt_try_input:
-  stl w14
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; I N P U T
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 73
-  bnefar .Lin_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  bnefar .Lin_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 80
-  bnefar .Lin_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 85
-  bnefar .Lin_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bnefar .Lin_no
-
-  ; consume T
-  ldl w10
-  inc
-  stl w10
-
-  ; delimiter
-  CALL tok_peek
-  ldl w0
-  u 32
-  beq .Lin_kw_ok
-  ldl w0
-  u 9
-  beq .Lin_kw_ok
-  ldl w0
-  i0
-  beq .Lin_kw_ok
-  brafar .Lin_no
-.Lin_kw_ok:
-  CALL tok_skip_spaces
-
-  ; ident
-  CALL tok_read_ident
-  ldl w1
-  i0
-  beq .Lin_syntax
-
-  ldl w0
-  stl w6              ; namePtr
-  ldl w1
-  stl w7              ; len
-
-  ; prompt "? "
-  LIB_PUTC_IMM 63
-  LIB_PUTC_IMM 32
-  LIB_READLINE_IMM LINE_BUF, LINE_MAX
-
-  i LINE_BUF
-  stl w10
-  CALL tok_skip_spaces
-  CALL expr_eval
-  ldl w1
-  i0
-  beq .Lin_syntax
-
-  ldl w0
-  stl w2              ; value
-
-  ldl w6
-  stl w0
-  ldl w7
-  stl w1
-  ldl w2
-  stl w2
-  CALL vars_set
-
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lin_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lin_no:
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-
-; ---------- GOSUB ----------
-; GOSUB <lineno>
-stmt_try_gosub:
-  stl w14
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; G O S U B
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 71
-  bnefar .Lgs_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 79
-  bnefar .Lgs_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 83
-  bnefar .Lgs_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 85
-  bnefar .Lgs_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 66
-  bnefar .Lgs_no
-
-  ; consume B
-  ldl w10
-  inc
-  stl w10
-
-  ; delimiter
-  CALL tok_peek
-  ldl w0
-  u 32
-  beq .Lgs_kw_ok
-  ldl w0
-  u 9
-  beq .Lgs_kw_ok
-  brafar .Lgs_no
-.Lgs_kw_ok:
-  CALL tok_skip_spaces
-
-  ; must be RUNning
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lgs_syntax
-
-  ; target line number
-  CALL tok_read_u16
-  ldl w1
-  i0
-  beq .Lgs_syntax
-  ldl w0
-  stl w7              ; target
-
-  ; sp
-  i SYS_GOSUB_SP
-  lu
-  stl w6
-  ldl w6
-  i GOSUB_STACK_MAX
-  bge .Lgs_ovf
-
-  ; addr = base + sp*2
-  ldl w6
-  ldl w6
-  add
-  i GOSUB_STACK_BASE
-  add
-  stl w5
-
-  ; push return pointer = SYS_NEXT_PTR
-  i SYS_NEXT_PTR_LO
-  lu
-  stl w1
-  i SYS_NEXT_PTR_HI
-  lu
-  stl w2
-  ldl w5
-  ldl w1
-  sb
-  ldl w5
-  inc
-  ldl w2
-  sb
-
-  ; sp++
-  ldl w6
-  inc
-  stl w6
-  i SYS_GOSUB_SP
-  ldl w6
-  sb
-
-  ; set GOTO pending to target line
-  ldl w7
-  u 0xFF
-  and
-  stl w1
-  ldl w7
-  srl 4
-  srl 4
-  u 0x7F
-  and
-  stl w2
-  i SYS_GOTO_LO
-  ldl w1
-  sb
-  i SYS_GOTO_HI
-  ldl w2
-  sb
-  i SYS_GOTO_PEND
-  u 1
-  sb
-
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lgs_ovf:
-  LIB_PUTS_Z_IMM gosub_ovf
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lgs_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lgs_no:
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-gosub_ovf:
-  .ascii "?GOSUB STACK"
-  .byte 0
-
-
-; ---------- RETURN ----------
-; RETURN
-stmt_try_return:
-  stl w14
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; R E T U R N
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  bnefar .Lrt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  bnefar .Lrt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bnefar .Lrt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 85
-  bnefar .Lrt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  bnefar .Lrt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  bnefar .Lrt_no
-
-  ; consume N
-  ldl w10
-  inc
-  stl w10
-
-  ; must be RUNning
-  i SYS_RUNNING
-  lu
-  i0
-  beq .Lrt_syntax
-
-  ; sp?
-  i SYS_GOSUB_SP
-  lu
-  stl w6
-  ldl w6
-  i0
-  beq .Lrt_uf
-
-  ; sp--
-  ldl w6
-  dec
-  stl w6
-  i SYS_GOSUB_SP
-  ldl w6
-  sb
-
-  ; addr = base + sp*2
-  ldl w6
-  ldl w6
-  add
-  i GOSUB_STACK_BASE
-  add
-  stl w5
-
-  ; pop ptr bytes
-  ldl w5
-  lu
-  stl w1
-  ldl w5
-  inc
-  lu
-  stl w2
-
-  i SYS_RET_PTR_LO
-  ldl w1
-  sb
-  i SYS_RET_PTR_HI
-  ldl w2
-  sb
-  i SYS_RET_PEND
-  u 1
-  sb
-
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lrt_uf:
-  LIB_PUTS_Z_IMM ret_uf
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lrt_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lrt_no:
-  ldl w9
-  stl w10
-  i0
-  stl w0
-  ldl w14
-  jr
-
-ret_uf:
-  .ascii "?RETURN WITHOUT GOSUB"
-  .byte 0
-
-
-; ---------- FOR ----------
-; FOR I=expr TO expr [STEP expr]
-stmt_try_for:
-  stl w14
-  CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; match FOR
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 70
-  bnefar .Lfor_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 79
-  bnefar .Lfor_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 82
-  bnefar .Lfor_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  ; must be RUNning
-  i SYS_RUNNING
-  lu
-  i0
-  beqfar .Lfor_syntax
-
-  ; ident
-  CALL tok_read_ident
-  ldl w1
-  i0
-  beqfar .Lfor_syntax
-  ldl w0
-  stl w6
-  ldl w1
-  stl w7
-
-  ; entryPtr
-  ldl w6
-  stl w0
-  ldl w7
-  stl w1
-  CALL vars_find_entry
+.Lsie_len_ok:
+  i VAR_NAME_BUF
+  stl w11
   ldl w0
   stl w12
-
-  CALL tok_skip_spaces
-  CALL tok_peek
-  ldl w0
-  u 61
-  bnefar .Lfor_syntax
-  ldl w10
-  inc
-  stl w10
-
-  CALL expr_eval
-  ldl w1
-  i0
-  beqfar .Lfor_syntax
-  ldl w0
-  stl w2
-
-  ; set var = start
-  ldl w2
-  u 0xFF
-  and
-  stl w3
-  ldl w2
-  srl 4
-  srl 4
-  stl w4
-  ldl w12
-  i (1 + VAR_NAME_MAX)
-  add
-  ldl w3
-  sb
-  ldl w12
-  i (2 + VAR_NAME_MAX)
-  add
-  ldl w4
-  sb
-
-  CALL tok_skip_spaces
-
-  ; match TO
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bnefar .Lfor_syntax
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 79
-  bnefar .Lfor_syntax
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  CALL expr_eval
-  ldl w1
-  i0
-  beqfar .Lfor_syntax
-  ldl w0
-  stl w8
-
-  i1
-  stl w9            ; step=1
-
-  ; optional STEP
-  CALL tok_skip_spaces
-  ldl w10
+  ldl w7
   stl w13
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 83
-  bne .Lfor_push
-
-  ; match STEP
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bne .Lfor_step_fail
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  bne .Lfor_step_fail
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 80
-  bne .Lfor_step_fail
-
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  CALL expr_eval
-  ldl w1
-  i0
-  beqfar .Lfor_syntax
-  ldl w0
-  stl w9
-  bra .Lfor_push
-
-.Lfor_step_fail:
+.Lsie_loop:
   ldl w13
-  stl w10
-
-.Lfor_push:
-  ; push frame (entryPtr, limit, step, loopPtr)
-  i SYS_FOR_SP
+  i0
+  beq .Lsie_yes
+  ldl w11
   lu
-  stl w5
-  ldl w5
-  i FOR_STACK_MAX
-  bge .Lfor_ovf
-
-  ldl w5
-  sll 2
-  sll 1
-  i FOR_STACK_BASE
-  add
-  stl w10
-
-  ; entryPtr
+  stl w2
   ldl w12
-  u 0xFF
-  and
-  stl w3
-  ldl w12
-  srl 4
-  srl 4
-  stl w4
-  ldl w10
-  ldl w3
-  sb
-  ldl w10
-  inc
-  ldl w4
-  sb
-
-  ; limit
-  ldl w8
-  u 0xFF
-  and
-  stl w3
-  ldl w8
-  srl 4
-  srl 4
-  stl w4
-  ldl w10
-  u 2
-  add
-  ldl w3
-  sb
-  ldl w10
-  u 3
-  add
-  ldl w4
-  sb
-
-  ; step
-  ldl w9
-  u 0xFF
-  and
-  stl w3
-  ldl w9
-  srl 4
-  srl 4
-  stl w4
-  ldl w10
-  u 4
-  add
-  ldl w3
-  sb
-  ldl w10
-  u 5
-  add
-  ldl w4
-  sb
-
-  ; loopPtr = SYS_NEXT_PTR
-  i SYS_NEXT_PTR_LO
   lu
   stl w3
-  i SYS_NEXT_PTR_HI
-  lu
-  stl w4
-  ldl w10
-  u 6
-  add
+  ldl w2
   ldl w3
-  sb
-  ldl w10
-  u 7
-  add
-  ldl w4
-  sb
-
-  ; sp++
-  ldl w5
-  inc
-  stl w5
-  i SYS_FOR_SP
-  ldl w5
-  sb
-
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lfor_ovf:
-  LIB_PUTS_Z_IMM for_ovf
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lfor_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lfor_no:
-  ldl w9
-  stl w10
+  beq .Lsie_next
   i0
   stl w0
   ldl w14
   jr
+.Lsie_next:
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  ldl w13
+  dec
+  stl w13
+  bra .Lsie_loop
+.Lsie_yes:
+  i1
+  stl w0
+  ldl w14
+  jr
 
-for_ovf:
-  .ascii "?FOR STACK"
-  .byte 0
+kw_end:    .ascii "END"
+kw_goto:   .ascii "GOTO"
+kw_gosub:  .ascii "GOSUB"
+kw_return: .ascii "RETURN"
+kw_new:    .ascii "NEW"
+kw_list:   .ascii "LIST"
+kw_run:    .ascii "RUN"
+kw_cls:    .ascii "CLS"
+kw_help:   .ascii "HELP"
+kw_if:     .ascii "IF"
+kw_for:    .ascii "FOR"
+kw_next:   .ascii "NEXT"
+kw_input:  .ascii "INPUT"
+kw_let:    .ascii "LET"
+kw_print:  .ascii "PRINT"
+kw_rem:    .ascii "REM"
 
-
-; ---------- NEXT ----------
-; NEXT [I]
-stmt_try_next:
+; ------------------------------------------------------------
+; stmt_parse_kind()
+; in:  w10 = parse pointer
+; out: w0 = STMTK_*
+;      w1 = first identifier length (0 if none)
+;      w10 advanced past the first identifier when nonzero
+;      returns STMTK_ASSIGN for a non-keyword identifier (A=5 style)
+; ------------------------------------------------------------
+stmt_parse_kind:
   stl w14
   CALL tok_skip_spaces
-  ldl w10
-  stl w9
-
-  ; match NEXT
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 78
-  bnefar .Lnxt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 69
-  bnefar .Lnxt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 88
-  bnefar .Lnxt_no
-  ldl w10
-  inc
-  stl w10
-  CALL tok_peek
-  CALL tok_to_upper
-  ldl w0
-  u 84
-  bnefar .Lnxt_no
-
-  ldl w10
-  inc
-  stl w10
-  CALL tok_skip_spaces
-
-  ; must be RUNning
-  i SYS_RUNNING
-  lu
+  CALL tok_read_ident
+  ldl w1
   i0
-  beqfar .Lnxt_syntax
-
-  i SYS_FOR_SP
-  lu
-  stl w5
-  ldl w5
+  bne .Lspk_have_ident
   i0
-  beqfar .Lnxt_uf
-
-  ldl w5
-  dec
-  stl w5
-
-  ldl w5
-  sll 2
-  sll 1
-  i FOR_STACK_BASE
-  add
-  stl w10
-
-  ; entryPtr bytes
-  ldl w10
-  lu
-  stl w12
-  ldl w10
-  inc
-  lu
-  stl w13
-
-  ; load limit
-  ldl w10
-  u 2
-  add
-  lu
+  stl w0
+  i0
   stl w1
-  ldl w10
+  ldl w14
+  jr
+.Lspk_have_ident:
+  ldl w1
+  stl w7
+
+  i kw_end
+  stl w0
   u 3
-  add
-  lu
-  stl w2
-  ldl w2
-  sll 4
-  sll 4
-  ldl w1
-  add
-  stl w8
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_end
 
-  ; load step
-  ldl w10
+  i kw_goto
+  stl w0
   u 4
-  add
-  lu
   stl w1
-  ldl w10
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_goto
+
+  i kw_gosub
+  stl w0
   u 5
-  add
-  lu
-  stl w2
-  ldl w2
-  sll 4
-  sll 4
-  ldl w1
-  add
-  stl w9
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_gosub
 
-  ; load loopPtr
-  ldl w10
+  i kw_return
+  stl w0
   u 6
-  add
-  lu
-  stl w3
-  ldl w10
-  u 7
-  add
-  lu
-  stl w4
-
-  ; entryPtr = (hi<<8)|lo
-  ldl w13
-  sll 4
-  sll 4
-  ldl w12
-  add
-  stl w6
-
-  ; cur
-  ldl w6
-  i (1 + VAR_NAME_MAX)
-  add
-  lu
   stl w1
-  ldl w6
-  i (2 + VAR_NAME_MAX)
-  add
-  lu
-  stl w2
-  ldl w2
-  sll 4
-  sll 4
-  ldl w1
-  add
-  stl w7
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_return
 
-  ; new=cur+step
-  ldl w7
-  ldl w9
-  add
-  stl w7
-
-  ; store new
-  ldl w7
-  u 0xFF
-  and
+  i kw_new
+  stl w0
+  u 3
   stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_new
+
+  i kw_list
+  stl w0
+  u 4
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_list
+
+  i kw_run
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_run
+
+  i kw_cls
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_cls
+
+  i kw_help
+  stl w0
+  u 4
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_help
+
+  i kw_if
+  stl w0
+  u 2
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_if
+
+  i kw_for
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_for
+
+  i kw_next
+  stl w0
+  u 4
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_next
+
+  i kw_input
+  stl w0
+  u 5
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_input
+
+  i kw_let
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_let
+
+  i kw_print
+  stl w0
+  u 5
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_print
+
+  i kw_rem
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_rem
+
+  u STMTK_ASSIGN
+  stl w0
   ldl w7
-  srl 4
-  srl 4
-  stl w2
-  ldl w6
-  i (1 + VAR_NAME_MAX)
-  add
+  stl w1
+  ldl w14
+  jr
+
+.Lspk_end:    u STMTK_END
+              stl w0
+              bra .Lspk_ret
+.Lspk_goto:   u STMTK_GOTO
+              stl w0
+              bra .Lspk_ret
+.Lspk_gosub:  u STMTK_GOSUB
+              stl w0
+              bra .Lspk_ret
+.Lspk_return: u STMTK_RETURN
+              stl w0
+              bra .Lspk_ret
+.Lspk_new:    u STMTK_NEW
+              stl w0
+              bra .Lspk_ret
+.Lspk_list:   u STMTK_LIST
+              stl w0
+              bra .Lspk_ret
+.Lspk_run:    u STMTK_RUN
+              stl w0
+              bra .Lspk_ret
+.Lspk_cls:    u STMTK_CLS
+              stl w0
+              bra .Lspk_ret
+.Lspk_help:   u STMTK_HELP
+              stl w0
+              bra .Lspk_ret
+.Lspk_if:     u STMTK_IF
+              stl w0
+              bra .Lspk_ret
+.Lspk_for:    u STMTK_FOR
+              stl w0
+              bra .Lspk_ret
+.Lspk_next:   u STMTK_NEXT
+              stl w0
+              bra .Lspk_ret
+.Lspk_input:  u STMTK_INPUT
+              stl w0
+              bra .Lspk_ret
+.Lspk_let:    u STMTK_LET
+              stl w0
+              bra .Lspk_ret
+.Lspk_print:  u STMTK_PRINT
+              stl w0
+              bra .Lspk_ret
+.Lspk_rem:    u STMTK_REM
+              stl w0
+              bra .Lspk_ret
+.Lspk_ret:
+  ldl w7
+  stl w1
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; stmt_dispatch()
+; Classifies the first identifier once, then executes only the tail.
+; in:  w10 parse pointer
+; out: w0 = 1 handled, 0 no match
+; ------------------------------------------------------------
+stmt_dispatch:
+  stl w14
+  CALL stmt_parse_kind
+  stl w8                ; kind
   ldl w1
-  sb
-  ldl w6
-  i (2 + VAR_NAME_MAX)
-  add
-  ldl w2
-  sb
+  stl w7                ; first ident len (for shorthand assignment)
 
-  ; step sign?
-  ldl w9
-  srl 4
-  srl 4
-  u 0x80
-  and
-  i0
-  bne .Lnxt_step_neg
-
-  ; step >=0 : exit if new>limit
-  ldl w7
   ldl w8
-  bgt .Lnxt_exit
-  bra .Lnxt_continue
+  i STMTK_NONE
+  beq .Lsd_no
 
-.Lnxt_step_neg:
-  ; step <0 : exit if new<limit
-  ldl w7
   ldl w8
-  blt .Lnxt_exit
+  i STMTK_END
+  beq .Lsd_end
+  ldl w8
+  u STMTK_GOTO
+  beq .Lsd_goto
+  ldl w8
+  u STMTK_GOSUB
+  beq .Lsd_gosub
+  ldl w8
+  u STMTK_RETURN
+  beq .Lsd_return
+  ldl w8
+  u STMTK_NEW
+  beq .Lsd_new
+  ldl w8
+  u STMTK_LIST
+  beq .Lsd_list
+  ldl w8
+  u STMTK_RUN
+  beq .Lsd_run
+  ldl w8
+  u STMTK_CLS
+  beq .Lsd_cls
+  ldl w8
+  u STMTK_HELP
+  beq .Lsd_help
+  ldl w8
+  u STMTK_IF
+  beq .Lsd_if
+  ldl w8
+  u STMTK_FOR
+  beq .Lsd_for
+  ldl w8
+  u STMTK_NEXT
+  beq .Lsd_next
+  ldl w8
+  u STMTK_INPUT
+  beq .Lsd_input
+  ldl w8
+  u STMTK_LET
+  beq .Lsd_let
+  ldl w8
+  u STMTK_PRINT
+  beq .Lsd_print
+  ldl w8
+  u STMTK_REM
+  beq .Lsd_rem
 
-.Lnxt_continue:
-  i SYS_RET_PTR_LO
-  ldl w3
-  sb
-  i SYS_RET_PTR_HI
-  ldl w4
-  sb
-  i SYS_RET_PEND
-  u 1
-  sb
-
-  u 1
-  stl w0
+  ; shorthand assignment: first identifier already consumed into VAR_NAME_BUF
+  ldl w7
+  stl w1
+  CALL stmt_exec_assign_ident
   ldl w14
   jr
-
-.Lnxt_exit:
-  i SYS_FOR_SP
-  ldl w5
-  sb
-
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lnxt_uf:
-  LIB_PUTS_Z_IMM nxt_uf
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lnxt_syntax:
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
-  i SYS_END_PEND
-  u 1
-  sb
-  u 1
-  stl w0
-  ldl w14
-  jr
-
-.Lnxt_no:
-  ldl w9
-  stl w10
+.Lsd_end:    CALL stmt_exec_end
+             ldl w14
+             jr
+.Lsd_goto:   CALL stmt_exec_goto
+             ldl w14
+             jr
+.Lsd_gosub:  CALL stmt_exec_gosub
+             ldl w14
+             jr
+.Lsd_return: CALL stmt_exec_return
+             ldl w14
+             jr
+.Lsd_new:    CALL stmt_exec_new
+             ldl w14
+             jr
+.Lsd_list:   CALL stmt_exec_list
+             ldl w14
+             jr
+.Lsd_run:    CALL stmt_exec_run
+             ldl w14
+             jr
+.Lsd_cls:    CALL stmt_exec_cls
+             ldl w14
+             jr
+.Lsd_help:   CALL stmt_exec_help
+             ldl w14
+             jr
+.Lsd_if:     CALL stmt_exec_if
+             ldl w14
+             jr
+.Lsd_for:    CALL stmt_exec_for
+             ldl w14
+             jr
+.Lsd_next:   CALL stmt_exec_next
+             ldl w14
+             jr
+.Lsd_input:  CALL stmt_exec_input
+             ldl w14
+             jr
+.Lsd_let:    CALL stmt_exec_let
+             ldl w14
+             jr
+.Lsd_print:  CALL stmt_exec_print
+             ldl w14
+             jr
+.Lsd_rem:    CALL stmt_exec_rem
+             ldl w14
+             jr
+.Lsd_no:
   i0
   stl w0
   ldl w14
   jr
 
-nxt_uf:
-  .ascii "?NEXT WITHOUT FOR"
-  .byte 0
-nxt_mis:
-  .ascii "?NEXT MISMATCH"
-  .byte 0
-
+.include "ROBIN-16/BASIC/stmt_ctrl.asm"
+.include "ROBIN-16/BASIC/stmt_prog.asm"
+.include "ROBIN-16/BASIC/stmt_assign.asm"
+.include "ROBIN-16/BASIC/stmt_io.asm"
+.include "ROBIN-16/BASIC/stmt_gosubret.asm"
+.include "ROBIN-16/BASIC/stmt_loop.asm"
+.include "ROBIN-16/BASIC/stmt_validate.asm"

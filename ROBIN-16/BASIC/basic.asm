@@ -1,5 +1,5 @@
 ; BIOS/R816/BASIC/basic.asm
-; R816 Tiny BASIC v0.4 (NEW/LIST/RUN/GOTO/END + LET + integer expressions)
+; R816 Tiny BASIC v0.4.3 (sorted store + strict statement tails)
 ;
 ; Notes:
 ; - Variables: QuickBASIC-ish (no type suffix), INT16 only in v0.4
@@ -9,49 +9,10 @@
 .width 8
 
 .include "ROBIN-16/BIOS/ports.inc"
-.include "ROBIN-16/LIB/io.inc"
+.include "ROBIN-16/BIOS/macros.inc"
+.include "ROBIN-16/BIOS/bios.inc"
 
-; ---------------- BASIC memory ----------------
-.equ LINE_BUF     0x9100
-.equ LINE_MAX     159
-
-; ---------------- Program store + UI/Run state ----------------
-.equ SYS_PROG_TOP   0x9000      ; 2 bytes: low, high
-.equ SYS_PROMPT     0x9002      ; 1 byte: 1=print READY, 0=silent (program entry)
-
-; RUN control flags (simple)
-.equ SYS_RUNNING    0x9003      ; 1 byte: 1=RUN active
-.equ SYS_GOTO_LO    0x9004      ; 1 byte
-.equ SYS_GOTO_HI    0x9005      ; 1 byte
-.equ SYS_GOTO_PEND  0x9006      ; 1 byte
-.equ SYS_END_PEND   0x9007      ; 1 byte
-
-; RUN context helpers (set by prog_run_loop)
-.equ SYS_NEXT_PTR_LO 0x9008      ; next record pointer (lo)
-.equ SYS_NEXT_PTR_HI 0x9009      ; next record pointer (hi)
-.equ SYS_RET_PTR_LO  0x900A      ; return/loop target record pointer (lo)
-.equ SYS_RET_PTR_HI  0x900B      ; return/loop target record pointer (hi)
-.equ SYS_RET_PEND    0x900C      ; 1 byte: 1 => jump to SYS_RET_PTR*
-
-; GOSUB/RETURN stack
-.equ SYS_GOSUB_SP    0x900D      ; 0..GOSUB_STACK_MAX
-.equ GOSUB_STACK_BASE 0x91E0     ; 16 * 2 bytes
-.equ GOSUB_STACK_MAX  16
-
-; FOR/NEXT stack
-.equ SYS_FOR_SP      0x900E      ; 0..FOR_STACK_MAX
-.equ FOR_STACK_BASE   0x9A80     ; right after VAR table
-.equ FOR_STACK_MAX    16         ; frames of 8 bytes
-
-.equ PROG_BASE      0xA000
-.equ PROG_LIMIT     0xBE00      ; first forbidden address
-
-; ---------------- Variables (INT16) ----------------
-.equ VAR_NAME_BUF   0x91A0      ; 32 bytes buffer (max 31 + NUL)
-.equ VAR_NAME_MAX   31
-.equ VAR_SLOTS      64
-.equ VAR_ENTRY_SIZE 34          ; 1 len + 31 name + 2 value
-.equ VAR_BASE       0x9200      ; 64*34 = 2176 bytes
+.include "ROBIN-16/BASIC/basic_mem.inc"
 
 .text
 .org 0x0000
@@ -92,17 +53,17 @@ start:
   i SYS_FOR_SP
   u 0
   sb
-  LIB_PUTS_Z_IMM banner
+  BIOS_PUTS_Z banner
 
 .Lbasic_repl:
   i SYS_PROMPT
   lu
   i0
   beq .Lno_prompt
-  LIB_PUTS_Z_IMM ready
+  BIOS_PUTS_Z ready
 
 .Lno_prompt:
-  LIB_READLINE_IMM LINE_BUF, LINE_MAX
+  BIOS_READLINE LINE_BUF, LINE_MAX
 
   i LINE_BUF
   stl w0
@@ -113,48 +74,12 @@ start:
 ; ------------------------------------------------------------
 ; basic_parse_lineno()
 ; in:  w10 = ptr at first digit
-; out: w0  = line number
+; out: w0 = line number, w1 = 1 iff valid BASIC line number consumed
 ;      w10 advanced past digits
 ; ------------------------------------------------------------
 basic_parse_lineno:
   stl w14
-
-  i0
-  stl w2
-
-.Lln_loop:
-  ldl w10
-  lu
-  stl w1
-
-  ldl w1
-  u 48
-  blt .Lln_done
-
-  ldl w1
-  u 58
-  bge .Lln_done
-
-  ldl w1
-  u 48
-  sub
-  stl w3
-
-  ldl w2
-  u 10
-  mul
-  ldl w3
-  add
-  stl w2
-
-  ldl w10
-  inc
-  stl w10
-  bra .Lln_loop
-
-.Lln_done:
-  ldl w2
-  stl w0
+  CALL tok_read_lineno
   ldl w14
   jr
 
@@ -193,7 +118,14 @@ basic_exec_line:
   bge .Lbasic_immediate
 
   ; ---------------- program line entry ----------------
-  CALL basic_parse_lineno      ; out: w0=lineNo, w10 advanced past digits
+  CALL basic_parse_lineno      ; out: w0=lineNo, w1=1 iff valid, w10 advanced
+  ldl w1
+  i1
+  beq .Lbasic_lineno_ok
+  BIOS_PUTS_Z err_syntax
+  BIOS_CRLF
+  brafar .Lbasic_done
+.Lbasic_lineno_ok:
   ldl w0
   stl w2                       ; lineNo
 
@@ -226,141 +158,28 @@ basic_exec_line:
 
   ; ---------------- immediate/direct mode ----------------
 .Lbasic_immediate:
-i SYS_PROMPT
-u 1
-sb
+  i SYS_PROMPT
+  u 1
+  sb
 
-; Save start-of-statement pointer (protect against partial keyword consumption)
-ldl w10
-stl w8
-
-ldl w8
-stl w10
-CALL stmt_try_end
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_goto
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_gosub
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_return
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_new
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_list
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_run
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_cls
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_help
-ldl w0
-i1
-beqfar .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_if
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_for
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_next
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_input
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_let
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_print
-ldl w0
-i1
-beq .Lbasic_done
-
-ldl w8
-stl w10
-CALL stmt_try_rem
-ldl w0
-i1
-beq .Lbasic_done
-
+  CALL stmt_dispatch
+  ldl w0
+  i1
+  beqfar .Lbasic_done
 
   ; unknown
-  LIB_PUTS_Z_IMM err_syntax
-  LIB_CRLF
+  BIOS_PUTS_Z err_syntax
+  BIOS_CRLF
 
-; If we are RUNning, abort RUN on syntax error
-i SYS_RUNNING
-lu
-i0
-beq .Lbasic_done
-i SYS_END_PEND
-u 1
-sb
-bra .Lbasic_done
-
+  ; If we are RUNning, abort RUN on syntax error
+  i SYS_RUNNING
+  lu
+  i0
+  beq .Lbasic_done
+  i SYS_END_PEND
+  u 1
+  sb
+  bra .Lbasic_done
 
 .Lbasic_empty:
   i SYS_PROMPT
@@ -372,7 +191,7 @@ bra .Lbasic_done
   jr
 
 banner:
-  .ascii "R816 TINY BASIC v0.4.2 (IF/THEN)\r\n"
+  .ascii "R816 TINY BASIC v0.4.3 (SORTED/STRICT)\r\n"
   .byte 0
 
 ready:

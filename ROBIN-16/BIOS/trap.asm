@@ -6,8 +6,7 @@
 ;   w1..w3 = args
 ;   return in w0
 ;
-.include "ROBIN-16/BIOS/bios.inc"
-.include "ROBIN-16/BIOS/macros.inc"
+; Included by the master translation unit after bios.inc/macros.inc.
 
 bios_trap:
   ; --- return to instruction AFTER ECALL ---

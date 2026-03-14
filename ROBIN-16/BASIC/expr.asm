@@ -49,6 +49,7 @@ expr_parse_expr:
 .Lex_e_loop:
   CALL tok_skip_spaces
   CALL tok_peek
+  ldl w0
   stl w3          ; op
 
   ; '+'?
@@ -104,6 +105,7 @@ expr_parse_term:
 .Lex_t_loop:
   CALL tok_skip_spaces
   CALL tok_peek
+  ldl w0
   stl w3          ; op
 
   ; '*'
@@ -153,6 +155,7 @@ expr_parse_factor:
 
   CALL tok_skip_spaces
   CALL tok_peek
+  ldl w0
   stl w3          ; ch
 
   ; '(' ?

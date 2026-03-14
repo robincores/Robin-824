@@ -2,8 +2,8 @@
 ; Variable table (QuickBASIC-ish):
 ; - case-insensitive names
 ; - max VAR_NAME_MAX chars
-; - no type suffix
-; - v0.4: INT16 only (signed)
+; - numeric vars: INT16 only (signed)
+; - string vars: trailing $ with fixed-size storage (v0.4.3 foundation)
 ;
 ; Table: open addressing, fixed-size entries
 ; entry layout:
@@ -286,7 +286,7 @@ vars_find_entry:
   CALL vars_hash
 
   ldl w0
-  u (VAR_SLOTS - 1)
+  u 63
   and
   stl w9               ; slot
 
@@ -319,7 +319,7 @@ vars_find_entry:
   ; next slot
   ldl w9
   inc
-  u (VAR_SLOTS - 1)
+  u 63
   and
   stl w9
   bra .Lvf_loop
@@ -408,5 +408,287 @@ vars_set:
 
   ldl w8
   stl w0
+  ldl w14
+  jr
+
+
+; ============================================================
+; String variables (trailing $)
+; Layout per entry (64 bytes):
+;   [0] len (0 => empty)
+;   [1..VAR_NAME_MAX] uppercased name bytes
+;   [1+VAR_NAME_MAX] str_len (0..STR_VAR_MAX)
+;   [2+VAR_NAME_MAX .. 2+VAR_NAME_MAX+STR_VAR_MAX-1] data bytes
+; ============================================================
+
+; ------------------------------------------------------------
+; strvars_init(): clear lengths to 0
+; ------------------------------------------------------------
+strvars_init:
+  stl w14
+
+  i STR_VAR_BASE
+  stl w10
+  i STR_VAR_SLOTS
+  stl w11
+
+.Lsvi_loop:
+  ldl w11
+  i0
+  beq .Lsvi_done
+
+  ldl w10
+  u 0
+  sb
+
+  ldl w10
+  i STR_ENTRY_SIZE
+  add
+  stl w10
+
+  ldl w11
+  dec
+  stl w11
+  bra .Lsvi_loop
+
+.Lsvi_done:
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; strvars_slot_to_entry(w0=slot) -> w0=entryPtr
+; offset = slot * 64
+; ------------------------------------------------------------
+strvars_slot_to_entry:
+  stl w14
+
+  ldl w0
+  sll 4
+  sll 4
+  sll 4
+  sll 4
+  sll 4
+  sll 4
+  stl w3
+
+  i STR_VAR_BASE
+  ldl w3
+  add
+  stl w0
+
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; strvars_create(w0=entryPtr, w1=namePtr, w2=len)
+; ------------------------------------------------------------
+strvars_create:
+  stl w14
+
+  ldl w0
+  stl w10
+  ldl w1
+  stl w11
+  ldl w2
+  stl w12
+
+  ; write name len
+  ldl w10
+  ldl w12
+  sb
+
+  ; copy name bytes
+  ldl w10
+  u 1
+  add
+  stl w4
+  ldl w11
+  stl w5
+  ldl w12
+  stl w6
+
+.Lsvc_loop:
+  ldl w6
+  i0
+  beq .Lsvc_zero
+
+  ldl w5
+  lu
+  stl w7
+  ldl w4
+  ldl w7
+  sb
+
+  ldl w4
+  inc
+  stl w4
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  dec
+  stl w6
+  bra .Lsvc_loop
+
+.Lsvc_zero:
+  ; string len = 0
+  ldl w10
+  i (1 + VAR_NAME_MAX)
+  add
+  u 0
+  sb
+
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; strvars_find_entry(w0=namePtr, w1=len) -> w0=entryPtr (creates if missing)
+; ------------------------------------------------------------
+strvars_find_entry:
+  stl w14
+
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_hash
+
+  ldl w0
+  u 15
+  and
+  stl w9
+
+.Lsvf_loop:
+  ldl w9
+  stl w0
+  CALL strvars_slot_to_entry
+  ldl w0
+  stl w10
+
+  ldl w10
+  lu
+  i0
+  beq .Lsvf_empty
+
+  ldl w10
+  stl w0
+  ldl w6
+  stl w1
+  ldl w7
+  stl w2
+  CALL vars_name_match
+
+  ldl w0
+  i1
+  beq .Lsvf_found
+
+  ldl w9
+  inc
+  u 15
+  and
+  stl w9
+  bra .Lsvf_loop
+
+.Lsvf_empty:
+  ldl w10
+  stl w0
+  ldl w6
+  stl w1
+  ldl w7
+  stl w2
+  CALL strvars_create
+
+.Lsvf_found:
+  ldl w10
+  stl w0
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; strvars_set_z(w0=namePtr, w1=len, w2=srcPtr NUL-terminated)
+; ------------------------------------------------------------
+strvars_set_z:
+  stl w14
+
+  ldl w2
+  stl w8               ; src
+
+  CALL strvars_find_entry
+  ldl w0
+  stl w10              ; entry
+
+  ldl w10
+  i (2 + VAR_NAME_MAX)
+  add
+  stl w11              ; dst data
+
+  i0
+  stl w12              ; count
+
+.Lsvs_loop:
+  ldl w8
+  lu
+  stl w1
+
+  ldl w1
+  i0
+  beq .Lsvs_done
+
+  ldl w12
+  i STR_VAR_MAX
+  bge .Lsvs_done
+
+  ldl w11
+  ldl w1
+  sb
+
+  ldl w11
+  inc
+  stl w11
+  ldl w8
+  inc
+  stl w8
+  ldl w12
+  inc
+  stl w12
+  bra .Lsvs_loop
+
+.Lsvs_done:
+  ; store string length
+  ldl w10
+  i (1 + VAR_NAME_MAX)
+  add
+  ldl w12
+  sb
+
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; strvars_get_ptr(w0=namePtr, w1=len) -> w0=dataPtr, w1=strLen
+; ------------------------------------------------------------
+strvars_get_ptr:
+  stl w14
+
+  CALL strvars_find_entry
+  ldl w0
+  stl w10
+
+  ldl w10
+  i (1 + VAR_NAME_MAX)
+  add
+  lu
+  stl w1
+
+  ldl w10
+  i (2 + VAR_NAME_MAX)
+  add
+  stl w0
+
   ldl w14
   jr
