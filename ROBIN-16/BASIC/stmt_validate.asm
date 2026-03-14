@@ -230,6 +230,9 @@ stmt_validate_print:
   ldl w0
   u 34
   beq .Lsvp_string
+  ldl w0
+  u TOKB_STR
+  beq .Lsvp_string
   CALL expr_eval
   ldl w1
   i1
@@ -451,11 +454,15 @@ stmt_validate_if:
   CALL tok_peek
   stl w3
   ldl w3
+  u TOKB_NUM16
+  beq .Lsvi_numeric_tail
+  ldl w3
   u 48
   blt .Lsvi_stmt_tail
   ldl w3
   u 58
   bge .Lsvi_stmt_tail
+.Lsvi_numeric_tail:
   CALL stmt_parse_line_target
   ldl w1
   i1

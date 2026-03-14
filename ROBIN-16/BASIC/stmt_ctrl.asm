@@ -184,11 +184,15 @@ stmt_exec_if:
   CALL tok_peek
   stl w3
   ldl w3
+  u TOKB_NUM16
+  beq .Lsei_numeric_tail
+  ldl w3
   u 48
   blt .Lsei_stmt_tail
   ldl w3
   u 58
   bge .Lsei_stmt_tail
+.Lsei_numeric_tail:
 
   CALL stmt_parse_line_target
   ldl w1

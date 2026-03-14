@@ -228,6 +228,11 @@ expr_parse_factor:
   u 45
   beq .Lfac_neg
 
+  ; tokenized number?
+  ldl w3
+  u TOKB_NUM16
+  beq .Lfac_number
+
   ; digit? '0'..'9'
   ldl w3
   u 48
@@ -236,6 +241,7 @@ expr_parse_factor:
   u 58
   bge .Lfac_ident
 
+.Lfac_number:
   CALL tok_read_u16
   ; tok_read_u16 sets w0=value, w1=consumed
   ldl w14

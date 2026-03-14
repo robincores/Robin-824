@@ -108,9 +108,42 @@ tok_is_kw_delim:
 tok_read_u16:
   stl w14
 
+  CALL tok_skip_spaces
   ldl w10
   stl w9            ; start
 
+  ; tokenized number fast path: TOKB_NUM16 lo hi
+  CALL tok_peek
+  ldl w0
+  u TOKB_NUM16
+  bne .Lnum_text
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w2
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w3
+  ldl w10
+  inc
+  stl w10
+  ldl w3
+  sll 4
+  sll 4
+  ldl w2
+  add
+  stl w0
+  u 1
+  stl w1
+  ldl w14
+  jr
+
+.Lnum_text:
   i0
   stl w2            ; value
 
@@ -253,10 +286,65 @@ tok_read_ident:
   stl w14
 
   CALL tok_skip_spaces
-
   ldl w10
   stl w9            ; start ptr
 
+  ; tokenized identifier fast path: TOKB_IDENT len bytes...
+  CALL tok_peek
+  ldl w0
+  u TOKB_IDENT
+  bne .Lid_text
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w11           ; len
+  ldl w10
+  inc
+  stl w10
+  i VAR_NAME_BUF
+  stl w12
+.Lid_tok_loop:
+  ldl w11
+  i0
+  beq .Lid_tok_done
+  ldl w10
+  lu
+  stl w0
+  ldl w12
+  ldl w0
+  sb
+  ldl w12
+  inc
+  stl w12
+  ldl w10
+  inc
+  stl w10
+  ldl w11
+  dec
+  stl w11
+  bra .Lid_tok_loop
+.Lid_tok_done:
+  ldl w12
+  u 0
+  sb
+  i VAR_NAME_BUF
+  stl w0
+  ldl w10
+  ldl w9
+  sub
+  dec
+  stl w1            ; real len = consumed minus token+len byte? temporary wrong? override below
+  ; recover len from stored count byte by re-reading previous byte
+  ldl w9
+  inc
+  lu
+  stl w1
+  ldl w14
+  jr
+
+.Lid_text:
   i VAR_NAME_BUF
   stl w12           ; dst
   i0
@@ -427,7 +515,6 @@ tok_read_ident:
   ldl w14
   jr
 
-
 ; ------------------------------------------------------------
 ; tok_skip_to_eol()
 ; Advances w10 until NUL (0) encountered (consumes rest of line).
@@ -471,6 +558,9 @@ tok_skip_to_eol:
 .equ TOKB_THEN   0x90
 .equ TOKB_TO     0x91
 .equ TOKB_STEP   0x92
+.equ TOKB_IDENT  0x93
+.equ TOKB_NUM16  0x94
+.equ TOKB_STR    0x95
 
 kwtok_end:    .ascii "END"
              .byte 0
@@ -834,8 +924,85 @@ tok_copy_zstr:
   ldl w14
   jr
 
+; tok_emit_u16_dec(w0=value, w11=dst, w12=lenSoFar)
+; emits unsigned decimal to detokenize buffer.
+tok_emit_u16_dec:
+  stl w14
+  ldl w0
+  stl w2              ; n
+  i0
+  stl w4              ; digit count
+  ldl w2
+  i0
+  bne .Lteud_loop_digits
+  ldl w11
+  u 48
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  ldl w14
+  jr
+.Lteud_loop_digits:
+  i0
+  stl w3              ; q
+.Lteud_div10:
+  ldl w2
+  u 10
+  blt .Lteud_have_rem
+  ldl w2
+  u 10
+  sub
+  stl w2
+  ldl w3
+  inc
+  stl w3
+  bra .Lteud_div10
+.Lteud_have_rem:
+  ldl w2
+  u 48
+  add
+  push
+  ldl w4
+  inc
+  stl w4
+  ldl w3
+  stl w2
+  ldl w2
+  i0
+  bne .Lteud_loop_digits
+.Lteud_emit:
+  ldl w4
+  i0
+  beq .Lteud_done
+  pop
+  stl w1
+  ldl w11
+  ldl w1
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  ldl w4
+  dec
+  stl w4
+  bra .Lteud_emit
+.Lteud_done:
+  ldl w14
+  jr
+
 ; tok_tokenize_line(w0=srcPtr, w1=dstPtr)
-; tokenizes keyword lexemes outside quoted strings, preserving all other text.
+; full tokenized source lines:
+; - strips spaces/tabs outside strings/comments
+; - tokenizes keywords, identifiers, u16 numbers, and quoted strings
+; - leaves operators/punctuation raw ASCII
+; - after REM, preserves remainder raw until NUL
 ; out: w0 = tokenizedLenIncludingNul, w1 = dstPtr
 tok_tokenize_line:
   stl w14
@@ -852,9 +1019,112 @@ tok_tokenize_line:
   ldl w0
   i0
   beq .Lttl_nul
+  ; skip spaces/tabs outside strings/comments
+  ldl w0
+  u 32
+  beq .Lttl_skip1
+  ldl w0
+  u 9
+  beq .Lttl_skip1
+  bra .Lttl_not_space
+.Lttl_skip1:
+  ldl w10
+  inc
+  stl w10
+  bra .Lttl_loop
+.Lttl_not_space:
+
+  ; quoted string -> TOKB_STR len bytes...
   ldl w0
   u 34
-  beq .Lttl_quote
+  bne .Lttl_not_quote
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  stl w9               ; payload start
+  i0
+  stl w7               ; len
+.Lttl_qscan:
+  ldl w10
+  lu
+  stl w1
+  ldl w1
+  i0
+  beq .Lttl_qraw       ; unterminated: preserve raw
+  ldl w1
+  u 34
+  beq .Lttl_qemit
+  ldl w10
+  inc
+  stl w10
+  ldl w7
+  inc
+  stl w7
+  bra .Lttl_qscan
+.Lttl_qemit:
+  ; emit TOKB_STR, len, payload bytes
+  ldl w5
+  u TOKB_STR
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w5
+  ldl w7
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w9
+  stl w3
+.Lttl_qcopy:
+  ldl w3
+  ldl w10
+  beq .Lttl_qdone
+  ldl w3
+  lu
+  stl w1
+  ldl w5
+  ldl w1
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w3
+  inc
+  stl w3
+  bra .Lttl_qcopy
+.Lttl_qdone:
+  ; consume closing quote
+  ldl w10
+  inc
+  stl w10
+  bra .Lttl_loop
+.Lttl_qraw:
+  ; preserve raw quote + tail on unterminated string
+  ldl w5
+  u 34
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w9
+  stl w10
+  bra .Lttl_rem_copy
+.Lttl_not_quote:
 
   ; identifier start? ('_' or alpha)
   ldl w0
@@ -875,14 +1145,84 @@ tok_tokenize_line:
   beq .Lttl_ident
   ldl w3
   u 65
-  blt .Lttl_raw
+  blt .Lttl_digit_check
   ldl w3
   u 91
+  blt .Lttl_ident
+.Lttl_digit_check:
+  ; decimal number start?
+  ldl w0
+  u 48
+  blt .Lttl_raw
+  ldl w0
+  u 58
   bge .Lttl_raw
+  ldl w10
+  stl w9
+  CALL tok_read_u16
+  ldl w1
+  i1
+  beq .Lttl_emit_num
+  ; overflow/non-u16: preserve raw consumed digit run
+  ldl w9
+  stl w3
+.Lttl_copy_raw_range:
+  ldl w3
+  ldl w10
+  beq .Lttl_loop
+  ldl w3
+  lu
+  stl w1
+  ldl w5
+  ldl w1
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w3
+  inc
+  stl w3
+  bra .Lttl_copy_raw_range
+.Lttl_emit_num:
+  ldl w5
+  u TOKB_NUM16
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w5
+  ldl w0
+  u 0xFF
+  and
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w5
+  ldl w0
+  srl 4
+  srl 4
+  u 0xFF
+  and
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  bra .Lttl_loop
 
 .Lttl_ident:
-  ldl w10
-  stl w9               ; start ptr
   CALL tok_read_ident
   ldl w1
   i0
@@ -892,9 +1232,9 @@ tok_tokenize_line:
   CALL tok_keyword_token
   ldl w0
   i0
-  beq .Lttl_copy_ident_raw
+  beq .Lttl_emit_ident
 
-  ; emit token byte
+  ; emit keyword token byte
   ldl w5
   ldl w0
   sb
@@ -930,67 +1270,50 @@ tok_tokenize_line:
   stl w10
   bra .Lttl_rem_copy
 
-.Lttl_copy_ident_raw:
-  ldl w9
+.Lttl_emit_ident:
+  ldl w5
+  u TOKB_IDENT
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w5
+  ldl w7
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  i VAR_NAME_BUF
   stl w3
-.Lttl_copy_ident_loop:
-  ldl w3
-  ldl w10
-  beq .Lttl_loop
-  ldl w3
-  lu
-  stl w1
-  ldl w5
-  ldl w1
-  sb
-  ldl w5
-  inc
-  stl w5
-  ldl w6
-  inc
-  stl w6
-  ldl w3
-  inc
-  stl w3
-  bra .Lttl_copy_ident_loop
-
-.Lttl_quote:
-  ; copy opening quote
-  ldl w5
-  u 34
-  sb
-  ldl w5
-  inc
-  stl w5
-  ldl w6
-  inc
-  stl w6
-  ldl w10
-  inc
-  stl w10
-.Lttl_qloop:
-  ldl w10
-  lu
-  stl w1
-  ldl w5
-  ldl w1
-  sb
-  ldl w5
-  inc
-  stl w5
-  ldl w6
-  inc
-  stl w6
-  ldl w1
+.Lttl_emit_ident_bytes:
+  ldl w7
   i0
-  beq .Lttl_done_ret
-  ldl w10
-  inc
-  stl w10
-  ldl w1
-  u 34
   beq .Lttl_loop
-  bra .Lttl_qloop
+  ldl w3
+  lu
+  stl w1
+  ldl w5
+  ldl w1
+  sb
+  ldl w5
+  inc
+  stl w5
+  ldl w6
+  inc
+  stl w6
+  ldl w3
+  inc
+  stl w3
+  ldl w7
+  dec
+  stl w7
+  bra .Lttl_emit_ident_bytes
 
 .Lttl_raw:
   ldl w5
@@ -1024,7 +1347,7 @@ tok_tokenize_line:
   jr
 
 ; tok_detokenize_line(w0=srcTokPtr, w1=dstPtr)
-; expands stored keyword tokens back to plain text for LIST/RUN.
+; expands stored tokens back to plain text for LIST/debug.
 ; out: w0 = detokenizedLenIncludingNul, w1 = dstPtr
 tok_detokenize_line:
   stl w14
@@ -1041,27 +1364,15 @@ tok_detokenize_line:
   ldl w0
   i0
   beq .Ltdl_nul
+
+  ; raw ASCII byte
   ldl w0
   i 0x80
   and
   i0
-  bne .Ltdl_token
-  ; raw byte
-  ldl w11
-  ldl w0
-  sb
-  ldl w11
-  inc
-  stl w11
-  ldl w12
-  inc
-  stl w12
-  ldl w10
-  inc
-  stl w10
-  bra .Ltdl_loop
+  beq .Ltdl_raw
 
-.Ltdl_token:
+  ; keyword tokens
   ldl w0
   u TOKB_END
   beq .Ltdl_emit_end
@@ -1119,7 +1430,203 @@ tok_detokenize_line:
   ldl w0
   u TOKB_STEP
   beq .Ltdl_emit_step
-  ; unknown high byte: emit raw as-is
+  ldl w0
+  u TOKB_IDENT
+  beq .Ltdl_emit_ident
+  ldl w0
+  u TOKB_NUM16
+  beq .Ltdl_emit_num
+  ldl w0
+  u TOKB_STR
+  beq .Ltdl_emit_str
+  bra .Ltdl_raw
+
+.Ltdl_emit_end:    i kwtok_end
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_goto:   i kwtok_goto
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_gosub:  i kwtok_gosub
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_return: i kwtok_return
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_new:    i kwtok_new
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_list:   i kwtok_list
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_run:    i kwtok_run
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_cls:    i kwtok_cls
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_help:   i kwtok_help
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_if:     i kwtok_if
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_for:    i kwtok_for
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_next:   i kwtok_next
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_input:  i kwtok_input
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_let:    i kwtok_let
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_print:  i kwtok_print
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_rem:    i kwtok_rem
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_then:   i kwtok_then
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_to:     i kwtok_to
+                   stl w0
+                   bra .Ltdl_copy_kw
+.Ltdl_emit_step:   i kwtok_step
+                   stl w0
+.Ltdl_copy_kw:
+  CALL tok_copy_zstr
+  ; insert a space after keywords for readability
+  ldl w11
+  u 32
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  bra .Ltdl_adv1
+
+.Ltdl_emit_ident:
+  ; token + len + bytes
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w7
+  ldl w10
+  inc
+  stl w10
+.Ltdl_ident_loop:
+  ldl w7
+  i0
+  beq .Ltdl_loop
+  ldl w10
+  lu
+  stl w1
+  ldl w11
+  ldl w1
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  ldl w10
+  inc
+  stl w10
+  ldl w7
+  dec
+  stl w7
+  bra .Ltdl_ident_loop
+
+.Ltdl_emit_num:
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w1
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w2
+  ldl w10
+  inc
+  stl w10
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w0
+  CALL tok_emit_u16_dec
+  bra .Ltdl_loop
+
+.Ltdl_emit_str:
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w7
+  ldl w10
+  inc
+  stl w10
+  ; opening quote
+  ldl w11
+  u 34
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+.Ltdl_str_loop:
+  ldl w7
+  i0
+  beq .Ltdl_str_done
+  ldl w10
+  lu
+  stl w1
+  ldl w11
+  ldl w1
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  ldl w10
+  inc
+  stl w10
+  ldl w7
+  dec
+  stl w7
+  bra .Ltdl_str_loop
+.Ltdl_str_done:
+  ldl w11
+  u 34
+  sb
+  ldl w11
+  inc
+  stl w11
+  ldl w12
+  inc
+  stl w12
+  bra .Ltdl_loop
+
+.Ltdl_raw:
   ldl w11
   ldl w0
   sb
@@ -1129,67 +1636,7 @@ tok_detokenize_line:
   ldl w12
   inc
   stl w12
-  bra .Ltdl_adv
-
-.Ltdl_emit_end:    i kwtok_end    ; token payloads detokenize in canonical uppercase
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_goto:   i kwtok_goto
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_gosub:  i kwtok_gosub
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_return: i kwtok_return
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_new:    i kwtok_new
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_list:   i kwtok_list
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_run:    i kwtok_run
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_cls:    i kwtok_cls
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_help:   i kwtok_help
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_if:     i kwtok_if
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_for:    i kwtok_for
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_next:   i kwtok_next
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_input:  i kwtok_input
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_let:    i kwtok_let
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_print:  i kwtok_print
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_rem:    i kwtok_rem
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_then:   i kwtok_then
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_to:     i kwtok_to
-                   stl w0
-                   bra .Ltdl_copy
-.Ltdl_emit_step:   i kwtok_step
-                   stl w0
-.Ltdl_copy:
-  CALL tok_copy_zstr
-.Ltdl_adv:
+.Ltdl_adv1:
   ldl w10
   inc
   stl w10

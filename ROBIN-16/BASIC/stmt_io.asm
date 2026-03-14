@@ -13,6 +13,9 @@ stmt_exec_print:
   ldl w0
   u 34
   beq .Lsep_string
+  ldl w0
+  u TOKB_STR
+  beq .Lsep_string
 
   CALL expr_eval
   ldl w1

@@ -236,9 +236,34 @@ stmt_scan_quoted_string:
   stl w14
   CALL tok_peek
   ldl w0
+  u TOKB_STR
+  beq .Lsqs_tok
+  ldl w0
   u 34
   beq .Lsqs_have_open
   i0
+  stl w0
+  ldl w14
+  jr
+.Lsqs_tok:
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  lu
+  stl w7
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  stl w2
+  ldl w10
+  ldl w7
+  add
+  stl w3
+  ldl w3
+  stl w10
+  u 1
   stl w0
   ldl w14
   jr
@@ -437,6 +462,9 @@ stmt_parse_kind:
   ldl w3
   u TOKB_REM
   beq .Lspk_tok_rem
+  ldl w3
+  u TOKB_IDENT
+  beq .Lspk_tok_ident
   ; non-statement token at line start
   i0
   stl w0
@@ -603,6 +631,12 @@ stmt_parse_kind:
   stl w0
   i0
   stl w1
+  ldl w14
+  jr
+.Lspk_tok_ident:
+  CALL tok_read_ident
+  u STMTK_ASSIGN
+  stl w0
   ldl w14
   jr
 
