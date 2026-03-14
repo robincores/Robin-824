@@ -1,23 +1,31 @@
 ; BIOS/R816/BASIC/expr.asm
-; Integer expression evaluator (hardened / streamlined pass)
+; Integer expression evaluator (final hardening pass)
 ; - signed 16-bit integers
 ; - grammar: expr   := term (('+'|'-') term)*
 ;            term   := factor (('*'|'/') factor)*
 ;            factor := number | ident | '(' expr ')' | '-' factor
 ;
-; Register contract:
-;   w0  = return value
-;   w1  = success flag (1=success, 0=failure)
-;   w2  = running left accumulator at current precedence level
-;   w3  = operator / current char scratch
-;   w4  = non-recursive temp (e.g. saved paren value)
-;   w10 = parse pointer (updated)
+; Contract:
+;   w0 = value (only valid when w1=1)
+;   w1 = success flag (1=success, 0=failure)
+;   w10 = parse pointer (advanced on successful consumption)
 ;
-; R8 style used here:
+; Internal register use:
+;   w2 = running left accumulator at current precedence level
+;   w3 = current operator / current char scratch
+;   w4 = scratch / saved inner value / discarded preserved-left sink
+;
+; R8 style here:
 ; - workspace registers hold live parser state
-; - operand stack is used for ALU flow
+; - operand stack is used for ALU flow only
 ; - PUSH/POP is used only at true recursive boundaries to preserve the
 ;   current left accumulator across a deeper parse call
+;
+; Hardening goals of this pass:
+; - missing RHS after '+' '-' '*' '/' fails hard
+; - missing ')' fails hard
+; - division by zero fails hard
+; - success is explicit in w1; value 0 is never used as an implicit error
 ;
 ; ------------------------------------------------------------
 ; expr_eval()
@@ -199,12 +207,22 @@ expr_parse_term:
   i0
   beq .Lex_t_rhs_fail
 
+  ; division by zero -> fail hard and discard preserved left
+  ldl w0
+  i0
+  beq .Lex_t_div_zero
+
   ; left = POP, rhs = w0
   pop
   ldl w0
   div
   stl w2
   bra .Lex_t_loop
+
+.Lex_t_div_zero:
+  pop
+  stl w4
+  bra .Lex_term_fail
 
 .Lex_t_rhs_fail:
   ; discard preserved left and fail hard
