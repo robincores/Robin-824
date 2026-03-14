@@ -107,6 +107,85 @@ stmt_parse_line_target:
   ldl w14
   jr
 
+; ------------------------------------------------------------
+; stmt_parse_then_keyword()
+; parses THEN as an exact identifier
+; out: w0=1 iff THEN consumed, else 0
+; ------------------------------------------------------------
+stmt_parse_then_keyword:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_read_ident
+  ldl w1
+  i4
+  beq .Lspth_len_ok
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lspth_len_ok:
+  ldl w1
+  stl w7
+  i kw_then
+  stl w0
+  u 4
+  stl w1
+  CALL stmt_ident_eq
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; stmt_scan_quoted_string()
+; in:  w10 at opening quote
+; out: w0=1 on success, 0 on unterminated/non-string
+;      w2 = start ptr (first char after opening quote)
+;      w3 = end ptr (closing quote position, exclusive)
+;      w10 advanced past closing quote on success
+; ------------------------------------------------------------
+stmt_scan_quoted_string:
+  stl w14
+  CALL tok_peek
+  ldl w0
+  u 34
+  beq .Lsqs_have_open
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsqs_have_open:
+  ldl w10
+  inc
+  stl w10
+  ldl w10
+  stl w2
+.Lsqs_loop:
+  CALL tok_peek
+  ldl w0
+  i0
+  beq .Lsqs_fail
+  ldl w0
+  u 34
+  beq .Lsqs_close
+  ldl w10
+  inc
+  stl w10
+  bra .Lsqs_loop
+.Lsqs_close:
+  ldl w10
+  stl w3
+  ldl w10
+  inc
+  stl w10
+  u 1
+  stl w0
+  ldl w14
+  jr
+.Lsqs_fail:
+  i0
+  stl w0
+  ldl w14
+  jr
+
 ; Statement kind enums
 .equ STMTK_NONE   0
 .equ STMTK_END    1
@@ -197,6 +276,7 @@ kw_input:  .ascii "INPUT"
 kw_let:    .ascii "LET"
 kw_print:  .ascii "PRINT"
 kw_rem:    .ascii "REM"
+kw_then:   .ascii "THEN"
 
 ; ------------------------------------------------------------
 ; stmt_parse_kind()
@@ -437,6 +517,7 @@ stmt_parse_kind:
 stmt_dispatch:
   stl w14
   CALL stmt_parse_kind
+  ldl w0
   stl w8                ; kind
   ldl w1
   stl w7                ; first ident len (for shorthand assignment)

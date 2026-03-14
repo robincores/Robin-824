@@ -23,7 +23,7 @@ stmt_exec_print:
   CALL stmt_require_eol
   ldl w0
   i1
-  bne .Lsep_num_ok
+  beq .Lsep_num_ok
   pop
   CALL stmt_fail_syntax
   ldl w14
@@ -46,35 +46,36 @@ stmt_exec_print:
   jr
 
 .Lsep_string:
-  ; consume opening quote
-  ldl w10
-  inc
-  stl w10
-.Lsep_str_loop:
-  CALL tok_peek
+  CALL stmt_scan_quoted_string
   ldl w0
-  i0
-  beq .Lsep_syntax
-  ldl w0
-  u 34
-  beq .Lsep_str_close
-  ldl w0
+  i1
+  beq .Lsep_have_string
+.Lsep_syntax:
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsep_have_string:
+  ldl w2
+  stl w11
+  ldl w3
+  stl w12
+.Lsep_emit_loop:
+  ldl w11
+  ldl w12
+  beq .Lsep_after_emit
+  ldl w11
+  lu
   stl w1
   BIOS_CALL0 SYS_PUTC
-  ldl w10
+  ldl w11
   inc
-  stl w10
-  bra .Lsep_str_loop
-
-.Lsep_str_close:
-  ldl w10
-  inc
-  stl w10
+  stl w11
+  bra .Lsep_emit_loop
+.Lsep_after_emit:
   CALL stmt_require_eol
   ldl w0
   i1
   beq .Lsep_str_done
-.Lsep_syntax:
   CALL stmt_fail_syntax
   ldl w14
   jr

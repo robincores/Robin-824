@@ -117,8 +117,8 @@ pick_jar() {
     jar="$(ls -1t "$TARGET_DIR"/*-shaded.jar 2>/dev/null | head -n 1 || true)"
   fi
 
-  if [[ -z "$jar" && -f "$TARGET_DIR/skyline-mac-aarch64.jar" ]]; then
-    jar="$TARGET_DIR/skyline-mac-aarch64.jar"
+  if [[ -z "$jar" && -f "$TARGET_DIR/robincores-mac-aarch64.jar" ]]; then
+    jar="$TARGET_DIR/robincores-mac-aarch64.jar"
   fi
 
   if [[ -z "$jar" ]]; then

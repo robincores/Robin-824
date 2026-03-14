@@ -626,6 +626,41 @@ prog_store_line:
   ldl w5
   i PROG_LIMIT
   bltu .Lps_have_room
+
+  ; spill caller-owned insert state: prog_compact() clobbers w6/w7/w8/w12
+  i SYS_STORE_LINE_LO
+  ldl w7
+  u 0xFF
+  and
+  sb
+  i SYS_STORE_LINE_HI
+  ldl w7
+  srl 4
+  srl 4
+  u 0x7F
+  and
+  sb
+  i SYS_STORE_TXT_LO
+  ldl w8
+  u 0xFF
+  and
+  sb
+  i SYS_STORE_TXT_HI
+  ldl w8
+  srl 4
+  srl 4
+  sb
+  i SYS_STORE_LEN
+  ldl w12
+  u 0xFF
+  and
+  sb
+  i SYS_STORE_RECSZ
+  ldl w6
+  u 0xFF
+  and
+  sb
+
   CALL prog_compact
   ldl w0
   i1
@@ -633,6 +668,40 @@ prog_store_line:
   CALL prog_report_bad_program
   bra .Lps_done
 .Lps_compact_ok:
+  ; restore caller-owned insert state after compaction
+  i SYS_STORE_LINE_LO
+  lu
+  stl w1
+  i SYS_STORE_LINE_HI
+  lu
+  stl w2
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w7
+
+  i SYS_STORE_TXT_LO
+  lu
+  stl w1
+  i SYS_STORE_TXT_HI
+  lu
+  stl w2
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w8
+
+  i SYS_STORE_LEN
+  lu
+  stl w12
+  i SYS_STORE_RECSZ
+  lu
+  stl w6
+
   ; re-find insertion point after compaction
   ldl w7
   stl w0

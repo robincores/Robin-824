@@ -1,5 +1,5 @@
 ; BIOS/R816/BASIC/expr.asm
-; Integer expression evaluator (v0.4)
+; Integer expression evaluator (v0.4.1)
 ; - signed 16-bit integers
 ; - grammar: expr := term (('+'|'-') term)*
 ;           term := factor (('*'|'/') factor)*
@@ -8,6 +8,10 @@
 ; Conventions:
 ;   w10 = parse pointer (updated)
 ;   expr_eval() -> w0=value, w1=1 if consumed tokens else 0
+;
+; IMPORTANT:
+;   expr_parse_expr and expr_parse_term keep their running left operand in w2.
+;   Because recursive sub-parsers also use w2/w3, left must be preserved across CALLs.
 
 ; ------------------------------------------------------------
 ; expr_eval()
@@ -69,25 +73,53 @@ expr_parse_expr:
   jr
 
 .Lex_e_plus:
+  ; consume '+'
   ldl w10
   inc
   stl w10
+
+  ; preserve left across recursive call
+  ldl w2
+  push
+
   CALL expr_parse_term
 
-  ldl w2
+  ; rhs -> w4
   ldl w0
+  stl w4
+
+  ; restore left
+  pop
+  stl w2
+
+  ldl w2
+  ldl w4
   add
   stl w2
   bra .Lex_e_loop
 
 .Lex_e_minus:
+  ; consume '-'
   ldl w10
   inc
   stl w10
+
+  ; preserve left across recursive call
+  ldl w2
+  push
+
   CALL expr_parse_term
 
-  ldl w2
+  ; rhs -> w4
   ldl w0
+  stl w4
+
+  ; restore left
+  pop
+  stl w2
+
+  ldl w2
+  ldl w4
   sub
   stl w2
   bra .Lex_e_loop
@@ -124,25 +156,53 @@ expr_parse_term:
   jr
 
 .Lex_t_mul:
+  ; consume '*'
   ldl w10
   inc
   stl w10
+
+  ; preserve left across recursive call
+  ldl w2
+  push
+
   CALL expr_parse_factor
 
-  ldl w2
+  ; rhs -> w4
   ldl w0
+  stl w4
+
+  ; restore left
+  pop
+  stl w2
+
+  ldl w2
+  ldl w4
   mul
   stl w2
   bra .Lex_t_loop
 
 .Lex_t_div:
+  ; consume '/'
   ldl w10
   inc
   stl w10
+
+  ; preserve left across recursive call
+  ldl w2
+  push
+
   CALL expr_parse_factor
 
-  ldl w2
+  ; rhs -> w4
   ldl w0
+  stl w4
+
+  ; restore left
+  pop
+  stl w2
+
+  ldl w2
+  ldl w4
   div
   stl w2
   bra .Lex_t_loop
@@ -200,13 +260,19 @@ expr_parse_factor:
 
   CALL expr_parse_expr
 
+  ; preserve inner value across tok helpers
+  ldl w0
+  push
+
   CALL tok_skip_spaces
   CALL tok_peek
   ldl w0
   u 41
   beq .Lfac_cons_rparen
 
-  ; missing ')': still return value
+  ; missing ')': still return saved value
+  pop
+  stl w0
   ldl w14
   jr
 
@@ -214,6 +280,10 @@ expr_parse_factor:
   ldl w10
   inc
   stl w10
+
+  pop
+  stl w0
+
   ldl w14
   jr
 

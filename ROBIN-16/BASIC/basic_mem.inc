@@ -21,8 +21,14 @@
 .equ SYS_RET_PEND    0x900C
 .equ SYS_GOSUB_SP    0x900D
 .equ SYS_FOR_SP      0x900E
-.equ SYS_ERRLINE_LO  0x900F
-.equ SYS_ERRLINE_HI  0x9010
+
+; Scratch bytes reserved for prog_store_line across prog_compact()
+.equ SYS_STORE_LINE_LO 0x900F
+.equ SYS_STORE_LINE_HI 0x9010
+.equ SYS_STORE_TXT_LO  0x9011
+.equ SYS_STORE_TXT_HI  0x9012
+.equ SYS_STORE_LEN     0x9013
+.equ SYS_STORE_RECSZ   0x9014
 
 .equ GOSUB_STACK_MAX   16
 .equ GOSUB_FRAME_BYTES 2
@@ -40,13 +46,6 @@
 .equ FOR_FRAME_BYTES  8
 .equ FOR_STACK_BYTES  (FOR_STACK_MAX * FOR_FRAME_BYTES)
 .equ FOR_STACK_BASE   0x9A80
-
-; String variables (current v0.4.3 layout)
-.equ STR_TMP_BUF      0x91C0
-.equ STR_VAR_SLOTS    16
-.equ STR_VAR_MAX      31
-.equ STR_ENTRY_SIZE   64
-.equ STR_VAR_BASE     0x9B00
 
 .equ PROG_BASE       0xA000
 .equ PROG_LIMIT      0xBE00

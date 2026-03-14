@@ -107,18 +107,7 @@ stmt_exec_if:
   ldl w0
   stl w4                ; right
 
-  CALL tok_skip_spaces
-  CALL tok_read_ident
-  ldl w1
-  i2
-  bne .Lsei_then_bad
-  ldl w1
-  stl w7
-  i kw_then_local
-  stl w0
-  u 4
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_then_keyword
   ldl w0
   i1
   beq .Lsei_then_ok
@@ -288,8 +277,6 @@ stmt_exec_if:
   ldl w14
   jr
 
-kw_then_local:
-  .ascii "THEN"
 
 ; END
 stmt_exec_end:

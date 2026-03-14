@@ -246,31 +246,17 @@ stmt_validate_print:
   ldl w14
   jr
 .Lsvp_string:
-  ldl w10
-  inc
-  stl w10
-.Lsvp_str_loop:
-  CALL tok_peek
+  CALL stmt_scan_quoted_string
   ldl w0
-  i0
-  beq .Lsvp_fail
-  ldl w0
-  u 34
-  beq .Lsvp_close
-  ldl w10
-  inc
-  stl w10
-  bra .Lsvp_str_loop
-.Lsvp_close:
-  ldl w10
-  inc
-  stl w10
-  CALL stmt_require_eol
-  ldl w14
-  jr
+  i1
+  beq .Lsvp_have_string
 .Lsvp_fail:
   i0
   stl w0
+  ldl w14
+  jr
+.Lsvp_have_string:
+  CALL stmt_require_eol
   ldl w14
   jr
 
@@ -471,23 +457,7 @@ stmt_validate_if:
   ldl w14
   jr
 .Lsvi_right_ok:
-  CALL tok_skip_spaces
-  CALL tok_read_ident
-  ldl w1
-  i4
-  beq .Lsvi_then_len_ok
-  i0
-  stl w0
-  ldl w14
-  jr
-.Lsvi_then_len_ok:
-  ldl w1
-  stl w7
-  i kw_then_local
-  stl w0
-  u 4
-  stl w1
-  CALL stmt_ident_eq
+  CALL stmt_parse_then_keyword
   ldl w0
   i1
   beq .Lsvi_then_ok

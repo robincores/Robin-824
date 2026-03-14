@@ -7,7 +7,7 @@
     <groupId>org.robincores</groupId>
     <artifactId>robin-home-computer</artifactId>
     <version>1.0-SNAPSHOT</version>
-    <name>Skyline R824</name>
+    <name>Robin Home Computer</name>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -147,7 +147,7 @@
     </dependencies>
 
     <build>
-        <finalName>skyline-${javafx.platform}</finalName>
+        <finalName>robincores-${javafx.platform}</finalName>
 
         <plugins>
             <plugin>
