@@ -30,6 +30,10 @@
 .equ SYS_STORE_LEN     0x9013
 .equ SYS_STORE_RECSZ   0x9014
 
+; Array allocator top (low/high)
+.equ SYS_ARR_TOP_LO   0x9015
+.equ SYS_ARR_TOP_HI   0x9016
+
 .equ GOSUB_STACK_MAX   16
 .equ GOSUB_FRAME_BYTES 2
 .equ GOSUB_STACK_BYTES (GOSUB_STACK_MAX * GOSUB_FRAME_BYTES)
@@ -58,5 +62,13 @@
 .equ STR_VAR_BYTES      (STR_VAR_SLOTS * STR_VAR_ENTRY_SIZE)
 .equ STR_VAR_BASE       0x9BA0
 
-.equ PROG_BASE       0xA000
+; Integer arrays: one-dimensional, DIM A(n), elements are INT16
+.equ ARR_SLOTS          8
+.equ ARR_DESC_ENTRY_SIZE (1 + VAR_NAME_MAX + 2 + 2)
+.equ ARR_DESC_BYTES      (ARR_SLOTS * ARR_DESC_ENTRY_SIZE)
+.equ ARR_DESC_BASE       0x9FB0
+.equ ARR_DATA_BASE       (ARR_DESC_BASE + ARR_DESC_BYTES)
+
+.equ PROG_BASE       0xA500
 .equ PROG_LIMIT      0xBE00
+.equ ARR_DATA_LIMIT  PROG_BASE

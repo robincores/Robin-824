@@ -92,7 +92,7 @@ vars_init:
 .Lvi_loop_str:
   ldl w11
   i0
-  beq .Lvi_done
+  beq .Lvi_done_str
   ldl w10
   u 0
   sb
@@ -104,7 +104,36 @@ vars_init:
   dec
   stl w11
   bra .Lvi_loop_str
+.Lvi_done_str:
+
+  ; array descriptors
+  i ARR_DESC_BASE
+  stl w10
+  i ARR_SLOTS
+  stl w11
+.Lvi_loop_arr:
+  ldl w11
+  i0
+  beq .Lvi_done
+  ldl w10
+  u 0
+  sb
+  ldl w10
+  i ARR_DESC_ENTRY_SIZE
+  add
+  stl w10
+  ldl w11
+  dec
+  stl w11
+  bra .Lvi_loop_arr
 .Lvi_done:
+  ; reset array allocator top
+  i SYS_ARR_TOP_LO
+  u (ARR_DATA_BASE & 0xFF)
+  sb
+  i SYS_ARR_TOP_HI
+  u ((ARR_DATA_BASE >> 8) & 0xFF)
+  sb
   ldl w14
   jr
 
@@ -664,5 +693,467 @@ strvars_set_z:
   ldl w6
   stl w3
   CALL strvars_set_range
+  ldl w14
+  jr
+
+
+; ------------------------------------------------------------
+; arr_slot_to_entry(w0=slot) -> w0=entryPtr
+; offset = slot*36 = (slot<<5) + (slot<<2)
+; ------------------------------------------------------------
+arr_slot_to_entry:
+  stl w14
+  ldl w0
+  stl w2
+  ldl w2
+  sll 4
+  sll 1
+  stl w3               ; *32
+  ldl w2
+  sll 2
+  ldl w3
+  add
+  stl w3               ; *36
+  i ARR_DESC_BASE
+  ldl w3
+  add
+  stl w0
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; arr_find_desc(w0=namePtr, w1=len) -> w0=entryPtr, w1=1 found else w0=0,w1=0
+; ------------------------------------------------------------
+arr_find_desc:
+  stl w14
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_hash
+  ldl w0
+  u 7
+  and
+  stl w9
+  i ARR_SLOTS
+  stl w13
+.Lafd_loop:
+  ldl w13
+  i0
+  beq .Lafd_not_found
+  ldl w9
+  stl w0
+  CALL arr_slot_to_entry
+  ldl w0
+  stl w10
+  ldl w10
+  lu
+  i0
+  beq .Lafd_not_found
+  ldl w10
+  stl w0
+  ldl w6
+  stl w1
+  ldl w7
+  stl w2
+  CALL vars_name_match
+  ldl w0
+  u 1
+  beq .Lafd_found
+  ldl w9
+  inc
+  u 7
+  and
+  stl w9
+  ldl w13
+  dec
+  stl w13
+  bra .Lafd_loop
+.Lafd_found:
+  ldl w10
+  stl w0
+  u 1
+  stl w1
+  ldl w14
+  jr
+.Lafd_not_found:
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; arr_dim(w0=namePtr, w1=len, w2=maxIndexInclusive) -> w0=1 success else 0
+; ------------------------------------------------------------
+arr_dim:
+  stl w14
+  ; reject negative max index
+  ldl w2
+  i 0x8000
+  and
+  i0
+  beq .Lad_nonneg
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lad_nonneg:
+  ; save args
+  ldl w0
+  push
+  ldl w1
+  push
+  ldl w2
+  push
+  ; existing desc? fail
+  CALL arr_find_desc
+  ldl w1
+  i1
+  bne .Lad_restore_fail_found
+  ; restore args
+  pop
+  stl w8               ; maxidx
+  pop
+  stl w7               ; len
+  pop
+  stl w6               ; namePtr
+  ; elements = maxidx + 1
+  ldl w8
+  inc
+  stl w12
+  ; bytes = elements * 2
+  ldl w12
+  sll 1
+  stl w11
+  ; top = SYS_ARR_TOP
+  i SYS_ARR_TOP_LO
+  lu
+  stl w1
+  i SYS_ARR_TOP_HI
+  lu
+  stl w2
+  ldl w2
+  sll 4
+  sll 4
+  ldl w1
+  add
+  stl w9               ; base/new alloc start
+  ; newTop = top + bytes
+  ldl w9
+  ldl w11
+  add
+  stl w10
+  ; require newTop <= ARR_DATA_LIMIT
+  ldl w10
+  i ARR_DATA_LIMIT
+  beq .Lad_space_ok
+  ldl w10
+  i ARR_DATA_LIMIT
+  bltu .Lad_space_ok
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lad_space_ok:
+  ; find first empty descriptor
+  i0
+  stl w13
+.Lad_find_slot:
+  ldl w13
+  i ARR_SLOTS
+  bltu .Lad_slot_check
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lad_slot_check:
+  ldl w13
+  stl w0
+  CALL arr_slot_to_entry
+  ldl w0
+  stl w5
+  ldl w5
+  lu
+  i0
+  beq .Lad_slot_empty
+  ldl w13
+  inc
+  stl w13
+  bra .Lad_find_slot
+.Lad_slot_empty:
+  ; create desc: len+name
+  ldl w5
+  ldl w7
+  sb
+  ldl w5
+  u 1
+  add
+  stl w3
+  ldl w6
+  stl w4
+  ldl w7
+  stl w2
+.Lad_copy_name:
+  ldl w2
+  i0
+  beq .Lad_meta
+  ldl w4
+  lu
+  stl w1
+  ldl w3
+  ldl w1
+  sb
+  ldl w3
+  inc
+  stl w3
+  ldl w4
+  inc
+  stl w4
+  ldl w2
+  dec
+  stl w2
+  bra .Lad_copy_name
+.Lad_meta:
+  ; store max index
+  ldl w5
+  i (1 + VAR_NAME_MAX)
+  add
+  ldl w8
+  u 0xFF
+  and
+  sb
+  ldl w5
+  i (2 + VAR_NAME_MAX)
+  add
+  ldl w8
+  srl 4
+  srl 4
+  u 0xFF
+  and
+  sb
+  ; store base
+  ldl w5
+  i (3 + VAR_NAME_MAX)
+  add
+  ldl w9
+  u 0xFF
+  and
+  sb
+  ldl w5
+  i (4 + VAR_NAME_MAX)
+  add
+  ldl w9
+  srl 4
+  srl 4
+  u 0xFF
+  and
+  sb
+  ; zero allocated bytes [base, newTop)
+  ldl w9
+  stl w6
+.Lad_zero_loop:
+  ldl w6
+  ldl w10
+  beq .Lad_zero_done
+  ldl w6
+  u 0
+  sb
+  ldl w6
+  inc
+  stl w6
+  bra .Lad_zero_loop
+.Lad_zero_done:
+  ; publish new top
+  i SYS_ARR_TOP_LO
+  ldl w10
+  u 0xFF
+  and
+  sb
+  i SYS_ARR_TOP_HI
+  ldl w10
+  srl 4
+  srl 4
+  u 0xFF
+  and
+  sb
+  u 1
+  stl w0
+  ldl w14
+  jr
+.Lad_restore_fail_found:
+  pop
+  stl w4
+  pop
+  stl w4
+  pop
+  stl w4
+  i0
+  stl w0
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; arr_elem_ptr(w0=namePtr, w1=len, w2=index) -> w0=elemPtr, w1=1/0
+; ------------------------------------------------------------
+arr_elem_ptr:
+  stl w14
+  ldl w2
+  stl w8               ; index
+  ; reject negative
+  ldl w8
+  i 0x8000
+  and
+  i0
+  beq .Laep_nonneg
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Laep_nonneg:
+  CALL arr_find_desc
+  ldl w1
+  i1
+  beq .Laep_have
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Laep_have:
+  ldl w0
+  stl w10
+  ; maxidx
+  ldl w10
+  i (1 + VAR_NAME_MAX)
+  add
+  lu
+  stl w2
+  ldl w10
+  i (2 + VAR_NAME_MAX)
+  add
+  lu
+  stl w3
+  ldl w3
+  sll 4
+  sll 4
+  ldl w2
+  add
+  stl w4
+  ; index <= maxidx ?
+  ldl w8
+  ldl w4
+  beq .Laep_bounds_ok
+  ldl w8
+  ldl w4
+  bltu .Laep_bounds_ok
+  i0
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
+.Laep_bounds_ok:
+  ; base ptr
+  ldl w10
+  i (3 + VAR_NAME_MAX)
+  add
+  lu
+  stl w2
+  ldl w10
+  i (4 + VAR_NAME_MAX)
+  add
+  lu
+  stl w3
+  ldl w3
+  sll 4
+  sll 4
+  ldl w2
+  add
+  stl w5
+  ; ptr = base + index*2
+  ldl w8
+  sll 1
+  ldl w5
+  add
+  stl w0
+  u 1
+  stl w1
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; arr_get(w0=namePtr, w1=len, w2=index) -> w0=value, w1=1/0
+; ------------------------------------------------------------
+arr_get:
+  stl w14
+  CALL arr_elem_ptr
+  ldl w1
+  i1
+  beq .Lag_have
+  ldl w14
+  jr
+.Lag_have:
+  ldl w0
+  stl w10
+  ldl w10
+  lu
+  stl w2
+  ldl w10
+  inc
+  lu
+  stl w3
+  ldl w3
+  sll 4
+  sll 4
+  ldl w2
+  add
+  stl w0
+  u 1
+  stl w1
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; arr_set(w0=namePtr, w1=len, w2=index, w3=value) -> w0=1/0
+; ------------------------------------------------------------
+arr_set:
+  stl w14
+  ldl w3
+  stl w12              ; value
+  CALL arr_elem_ptr
+  ldl w1
+  i1
+  beq .Las_have
+  i0
+  stl w0
+  ldl w14
+  jr
+.Las_have:
+  ldl w0
+  stl w10
+  ldl w10
+  ldl w12
+  u 0xFF
+  and
+  sb
+  ldl w10
+  inc
+  ldl w12
+  srl 4
+  srl 4
+  u 0xFF
+  and
+  sb
+  u 1
+  stl w0
   ldl w14
   jr

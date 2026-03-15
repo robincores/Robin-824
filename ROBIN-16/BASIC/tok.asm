@@ -561,6 +561,7 @@ tok_skip_to_eol:
 .equ TOKB_IDENT  0x93
 .equ TOKB_NUM16  0x94
 .equ TOKB_STR    0x95
+.equ TOKB_DIM    0x96
 
 kwtok_end:    .ascii "END"
              .byte 0
@@ -599,6 +600,8 @@ kwtok_then:   .ascii "THEN"
 kwtok_to:     .ascii "TO"
 .byte 0
 kwtok_step:   .ascii "STEP"
+.byte 0
+kwtok_dim:    .ascii "DIM"
 .byte 0
 
 ; tok_kw_buf_eq(w0=kwPtr, w1=kwLen, w7=currentLen) -> w0=1/0
@@ -830,6 +833,15 @@ tok_keyword_token:
   i1
   beq .Ltkkt_step
 
+  i kwtok_dim
+  stl w0
+  u 3
+  stl w1
+  CALL tok_kw_buf_eq
+  ldl w0
+  i1
+  beq .Ltkkt_dim
+
   i0
   stl w0
   ldl w14
@@ -889,6 +901,9 @@ tok_keyword_token:
                stl w0
                bra .Ltkkt_ret
 .Ltkkt_step:   u TOKB_STEP
+               stl w0
+               bra .Ltkkt_ret
+.Ltkkt_dim:    u TOKB_DIM
                stl w0
 .Ltkkt_ret:
   ldl w14
@@ -1439,6 +1454,9 @@ tok_detokenize_line:
   ldl w0
   u TOKB_STR
   beq .Ltdl_emit_str
+  ldl w0
+  u TOKB_DIM
+  beq .Ltdl_emit_dim
   bra .Ltdl_raw
 
 .Ltdl_emit_end:    i kwtok_end

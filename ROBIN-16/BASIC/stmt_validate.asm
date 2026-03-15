@@ -65,6 +65,9 @@ stmt_validate_dispatch:
   ldl w8
   u STMTK_REM
   beq .Lsvd_rem
+  ldl w8
+  u STMTK_DIM
+  beq .Lsvd_dim
 
   ; shorthand assignment
   ldl w7
@@ -115,6 +118,9 @@ stmt_validate_dispatch:
               ldl w14
               jr
 .Lsvd_print:  CALL stmt_validate_print
+              ldl w14
+              jr
+.Lsvd_dim:    CALL stmt_validate_dim
               ldl w14
               jr
 .Lsvd_rem:    u 1
@@ -239,6 +245,48 @@ stmt_validate_assign_string_common:
   ldl w14
   jr
 
+
+stmt_validate_assign_array_common:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  beq .Lsvaa_lparen
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvaa_lparen:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_eval
+  ldl w1
+  i1
+  beq .Lsvaa_idx_ok
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvaa_idx_ok:
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 41
+  beq .Lsvaa_rparen
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvaa_rparen:
+  ldl w10
+  inc
+  stl w10
+  CALL stmt_validate_assign_common
+  ldl w14
+  jr
+
 stmt_validate_let:
   stl w14
   CALL tok_skip_spaces
@@ -255,6 +303,11 @@ stmt_validate_let:
   stl w6
   ldl w1
   stl w7
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  beq .Lsvl_array
   ldl w6
   stl w0
   ldl w7
@@ -264,6 +317,10 @@ stmt_validate_let:
   i1
   beq .Lsvl_string
   CALL stmt_validate_assign_common
+  ldl w14
+  jr
+.Lsvl_array:
+  CALL stmt_validate_assign_array_common
   ldl w14
   jr
 .Lsvl_string:
@@ -277,6 +334,11 @@ stmt_validate_assign_ident:
   stl w6
   ldl w1
   stl w7
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  beq .Lsvai_array
   ldl w6
   stl w0
   ldl w7
@@ -288,8 +350,66 @@ stmt_validate_assign_ident:
   CALL stmt_validate_assign_common
   ldl w14
   jr
+.Lsvai_array:
+  CALL stmt_validate_assign_array_common
+  ldl w14
+  jr
 .Lsvai_string:
   CALL stmt_validate_assign_string_common
+  ldl w14
+  jr
+
+stmt_validate_dim:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_read_ident
+  ldl w1
+  i0
+  bne .Lsvdim_have
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvdim_have:
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  beq .Lsvdim_fail
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  bne .Lsvdim_fail
+  ldl w10
+  inc
+  stl w10
+  CALL expr_eval
+  ldl w1
+  i1
+  bne .Lsvdim_idx
+.Lsvdim_fail:
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvdim_idx:
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 41
+  bne .Lsvdim_fail
+  ldl w10
+  inc
+  stl w10
+  CALL stmt_require_eol
   ldl w14
   jr
 

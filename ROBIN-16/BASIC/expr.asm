@@ -282,11 +282,13 @@ expr_parse_factor:
   i0
   beq .Lfac_fail
 
-  ; string names are not valid in numeric expressions
+  ; save identifier
   ldl w0
   stl w6
   ldl w1
   stl w7
+
+  ; string names are not valid in numeric expressions
   ldl w6
   stl w0
   ldl w7
@@ -296,6 +298,13 @@ expr_parse_factor:
   i1
   beq .Lfac_fail
 
+  ; optional array index: A(expr)
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  beq .Lfac_array
+
   ; vars_get(namePtr=w6, len=w7) -> w0=value
   ldl w6
   stl w0
@@ -304,6 +313,41 @@ expr_parse_factor:
   CALL vars_get
   u 1
   stl w1
+  ldl w14
+  jr
+
+.Lfac_array:
+  ; consume '('
+  ldl w10
+  inc
+  stl w10
+  CALL expr_parse_expr
+  ldl w1
+  i0
+  beq .Lfac_fail
+  ldl w0
+  stl w8
+  ; reject negative index
+  ldl w8
+  i 0x8000
+  and
+  i0
+  bne .Lfac_fail
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 41
+  bne .Lfac_fail
+  ldl w10
+  inc
+  stl w10
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  ldl w8
+  stl w2
+  CALL arr_get
   ldl w14
   jr
 

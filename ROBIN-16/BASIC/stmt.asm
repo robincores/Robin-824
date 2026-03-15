@@ -75,6 +75,34 @@ stmt_fail_syntax:
   jr
 
 ; ------------------------------------------------------------
+; stmt_fail_subscript()
+; prints ?SUBSCRIPT ERROR, aborts RUN if active, returns handled=1
+; ------------------------------------------------------------
+stmt_fail_subscript:
+  stl w14
+  BIOS_PUTS_Z err_subscript
+  BIOS_CRLF
+  CALL stmt_abort_if_running
+  u 1
+  stl w0
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
+; stmt_fail_dim()
+; prints ?DIM ERROR, aborts RUN if active, returns handled=1
+; ------------------------------------------------------------
+stmt_fail_dim:
+  stl w14
+  BIOS_PUTS_Z err_dim
+  BIOS_CRLF
+  CALL stmt_abort_if_running
+  u 1
+  stl w0
+  ldl w14
+  jr
+
+; ------------------------------------------------------------
 ; stmt_require_eol()
 ; skips trailing spaces; returns w0=1 iff at end of line
 ; ------------------------------------------------------------
@@ -320,6 +348,7 @@ stmt_scan_quoted_string:
 .equ STMTK_PRINT  15
 .equ STMTK_REM    16
 .equ STMTK_ASSIGN 17
+.equ STMTK_DIM    18
 
 ; ------------------------------------------------------------
 ; stmt_ident_eq(w0=kwPtr, w1=kwLen, w7=currentLen) -> w0=1/0
@@ -392,6 +421,7 @@ kw_let:    .ascii "LET"
 kw_print:  .ascii "PRINT"
 kw_rem:    .ascii "REM"
 kw_then:   .ascii "THEN"
+kw_dim:    .ascii "DIM"
 
 ; ------------------------------------------------------------
 ; stmt_parse_kind()
@@ -462,6 +492,9 @@ stmt_parse_kind:
   ldl w3
   u TOKB_REM
   beq .Lspk_tok_rem
+  ldl w3
+  u TOKB_DIM
+  beq .Lspk_tok_dim
   ldl w3
   u TOKB_IDENT
   beq .Lspk_tok_ident
@@ -633,6 +666,16 @@ stmt_parse_kind:
   stl w1
   ldl w14
   jr
+.Lspk_tok_dim:
+  ldl w10
+  inc
+  stl w10
+  u STMTK_DIM
+  stl w0
+  i0
+  stl w1
+  ldl w14
+  jr
 .Lspk_tok_ident:
   CALL tok_read_ident
   u STMTK_ASSIGN
@@ -799,6 +842,15 @@ stmt_parse_kind:
   i1
   beq .Lspk_rem
 
+  i kw_dim
+  stl w0
+  u 3
+  stl w1
+  CALL stmt_ident_eq
+  ldl w0
+  i1
+  beq .Lspk_dim
+
   u STMTK_ASSIGN
   stl w0
   ldl w7
@@ -852,6 +904,9 @@ stmt_parse_kind:
               stl w0
               bra .Lspk_ret
 .Lspk_rem:    u STMTK_REM
+              stl w0
+              bra .Lspk_ret
+.Lspk_dim:    u STMTK_DIM
               stl w0
               bra .Lspk_ret
 .Lspk_ret:
@@ -926,6 +981,9 @@ stmt_dispatch:
   ldl w8
   u STMTK_REM
   beq .Lsd_rem
+  ldl w8
+  u STMTK_DIM
+  beq .Lsd_dim
 
   ; shorthand assignment: first identifier already consumed into VAR_NAME_BUF
   ldl w7
@@ -979,6 +1037,9 @@ stmt_dispatch:
              ldl w14
              jr
 .Lsd_rem:    CALL stmt_exec_rem
+             ldl w14
+             jr
+.Lsd_dim:    CALL stmt_exec_dim
              ldl w14
              jr
 .Lsd_no:

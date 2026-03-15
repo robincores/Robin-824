@@ -1,3 +1,109 @@
+; ------------------------------------------------------------
+; stmt_assign_array_common()
+; in:
+;   w6 = array namePtr
+;   w7 = array nameLen
+;   w10 at '(' or following spaces before '('
+; out: w0 = 1 handled
+; integer arrays only
+; ------------------------------------------------------------
+stmt_assign_array_common:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 40
+  beq .Lsaac_lparen
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_lparen:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_eval
+  ldl w1
+  i1
+  beq .Lsaac_idx_ok
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_idx_ok:
+  ldl w0
+  stl w9               ; index
+  ; reject negative index immediately
+  ldl w9
+  i 0x8000
+  and
+  i0
+  beq .Lsaac_idx_nonneg
+  CALL stmt_fail_subscript
+  ldl w14
+  jr
+.Lsaac_idx_nonneg:
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 41
+  beq .Lsaac_rparen
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_rparen:
+  ldl w10
+  inc
+  stl w10
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 61
+  beq .Lsaac_eq
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_eq:
+  ldl w10
+  inc
+  stl w10
+  CALL expr_eval
+  ldl w1
+  i1
+  beq .Lsaac_val_ok
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_val_ok:
+  ldl w0
+  stl w8               ; value
+  CALL stmt_require_eol
+  ldl w0
+  i1
+  beq .Lsaac_store
+  CALL stmt_fail_syntax
+  ldl w14
+  jr
+.Lsaac_store:
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  ldl w9
+  stl w2
+  ldl w8
+  stl w3
+  CALL arr_set
+  ldl w0
+  i1
+  beq .Lsaac_ok
+  CALL stmt_fail_subscript
+  ldl w14
+  jr
+.Lsaac_ok:
+  u 1
+  stl w0
+  ldl w14
+  jr
+
 ; Assignment statements.
 
 ; ------------------------------------------------------------
