@@ -51,5 +51,12 @@
 .equ TOK_LINE_BUF    0x9B00
 .equ TOK_LINE_MAX    LINE_MAX
 
+; String variables: trailing $ names, fixed-size storage (strings pass)
+.equ STR_VAR_SLOTS      16
+.equ STR_VAR_DATA_MAX   32
+.equ STR_VAR_ENTRY_SIZE (1 + VAR_NAME_MAX + 1 + STR_VAR_DATA_MAX)
+.equ STR_VAR_BYTES      (STR_VAR_SLOTS * STR_VAR_ENTRY_SIZE)
+.equ STR_VAR_BASE       0x9BA0
+
 .equ PROG_BASE       0xA000
 .equ PROG_LIMIT      0xBE00

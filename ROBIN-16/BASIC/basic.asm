@@ -53,6 +53,7 @@ start:
   i SYS_FOR_SP
   u 0
   sb
+
   BIOS_PUTS_Z banner
 
 .Lbasic_repl:
@@ -183,7 +184,7 @@ basic_exec_line:
 
 .Lbasic_empty:
   i SYS_PROMPT
-  u 1
+  u 0 ; suppress READY on empty line
   sb
 
 .Lbasic_done:

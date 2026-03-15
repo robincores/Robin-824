@@ -182,6 +182,63 @@ stmt_validate_assign_common:
   ldl w14
   jr
 
+stmt_validate_assign_string_common:
+  stl w14
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 61
+  beq .Lsvasc_eq
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvasc_eq:
+  ldl w10
+  inc
+  stl w10
+  CALL tok_skip_spaces
+  CALL tok_peek
+  ldl w0
+  u 34
+  beq .Lsvasc_lit
+  ldl w0
+  u TOKB_STR
+  beq .Lsvasc_lit
+  CALL tok_read_ident
+  ldl w1
+  i0
+  beq .Lsvasc_fail
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  bne .Lsvasc_fail
+  CALL stmt_require_eol
+  ldl w14
+  jr
+.Lsvasc_lit:
+  CALL stmt_scan_quoted_string
+  ldl w0
+  i1
+  beq .Lsvasc_lit_ok
+.Lsvasc_fail:
+  i0
+  stl w0
+  ldl w14
+  jr
+.Lsvasc_lit_ok:
+  CALL stmt_require_eol
+  ldl w14
+  jr
+
 stmt_validate_let:
   stl w14
   CALL tok_skip_spaces
@@ -194,13 +251,45 @@ stmt_validate_let:
   ldl w14
   jr
 .Lsvl_have:
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  beq .Lsvl_string
   CALL stmt_validate_assign_common
+  ldl w14
+  jr
+.Lsvl_string:
+  CALL stmt_validate_assign_string_common
   ldl w14
   jr
 
 stmt_validate_assign_ident:
   stl w14
+  i VAR_NAME_BUF
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  beq .Lsvai_string
   CALL stmt_validate_assign_common
+  ldl w14
+  jr
+.Lsvai_string:
+  CALL stmt_validate_assign_string_common
   ldl w14
   jr
 
@@ -233,6 +322,36 @@ stmt_validate_print:
   ldl w0
   u TOKB_STR
   beq .Lsvp_string
+
+  ; string variable?
+  ldl w10
+  stl w13
+  CALL tok_read_ident
+  ldl w1
+  i0
+  beq .Lsvp_expr
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  beq .Lsvp_strvar
+  ldl w13
+  stl w10
+  bra .Lsvp_expr
+.Lsvp_strvar:
+  CALL stmt_require_eol
+  ldl w14
+  jr
+.Lsvp_expr:
+  ldl w13
+  stl w10
   CALL expr_eval
   ldl w1
   i1

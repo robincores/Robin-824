@@ -282,7 +282,25 @@ expr_parse_factor:
   i0
   beq .Lfac_fail
 
-  ; vars_get(namePtr=w0, len=w1) -> w0=value
+  ; string names are not valid in numeric expressions
+  ldl w0
+  stl w6
+  ldl w1
+  stl w7
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
+  CALL vars_name_is_string
+  ldl w0
+  i1
+  beq .Lfac_fail
+
+  ; vars_get(namePtr=w6, len=w7) -> w0=value
+  ldl w6
+  stl w0
+  ldl w7
+  stl w1
   CALL vars_get
   u 1
   stl w1

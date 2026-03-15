@@ -84,5 +84,5 @@ stmt_exec_help:
   jr
 
 help_text:
-  .ascii "COMMANDS: NEW, LIST, RUN, GOTO, GOSUB, RETURN, END, IF, FOR, NEXT, INPUT, LET, PRINT, CLS, HELP"
+  .ascii "COMMANDS: NEW, LIST, RUN, GOTO, GOSUB, RETURN, END, IF, FOR, NEXT, INPUT, LET, PRINT, CLS, HELP (STRINGS: A$)"
   .byte 0
